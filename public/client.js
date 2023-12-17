@@ -21,12 +21,13 @@ const vert = `
 `
 
 const frag = `
-    #define MAX_STEPS 10000
+    #define MAX_STEPS 100000
     #define MAX_DIST 200.
-    #define MIN_DIST 0.01
-    #define DOTS_PER_MM 10.
+    #define MIN_DIST 0.001
+    #define DOTS_PER_MM 25.
     #define NORM_EPS 0.001
     #define PI 3.141592
+    #define TAU 6.283185
 
     varying vec3 vNormal;
     varying vec2 vUv;
@@ -35,13 +36,21 @@ const frag = `
     uniform sampler2D uFrontTexture;
     uniform sampler2D uBackTexture;
     uniform vec3 uCameraPos;
-    uniform vec3 uCameraDir;
     uniform vec2 uCameraSize;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    uniform float uCameraZoom;
 
     // PARAMS
-    float scale = 1.; // Geo scale
+    float scale = 2.0; // Geo scale
     vec3 objCol = vec3(1.0, 1.0, 1.0); // Base material color
-
+    vec3 lightCol = vec3(1.0, 1.0, 1.0); // Light color
+    vec3 lightPos = vec3(50.); // Light source position
+    float ambiStrength = 0.4; // Ambient light strength
+    float diffStength = 0.4; // Diffuse light strength
+    float specStrength = 0.2; // Specular light strength
+    float specPow = 4.0; // Specular light power (spread)
+    float gyroidFactor = 0.6; // Factor for shape of gyroid
 
     // GEOMETRY
 
@@ -51,11 +60,6 @@ const frag = `
         return (dot(sin(point), cos(point.zxy))) + gyroidFactor;
     }
 
-    // Sphere
-    float distSphere(vec3 point, vec3 center, float radius) {
-        vec3 transPoint = (point - center);
-        return length(transPoint) - radius;
-    }
 
     // GEOMETRY COMBINATIONS
 
@@ -63,20 +67,21 @@ const frag = `
     float distCombine( vec3 position ) {
         
         // geometry
-        float dist = distGyroidBeam( position, 0.8);
-        // float dist = distSphere(position, vec3(0.0), 5.);
-        return dist;
+        
+        float beamDist = distGyroidBeam( position, gyroidFactor);
+        return beamDist / uCameraZoom;
     }     
 
         
     // RAY TOOLS
 
     // Ray March
-    float marcher(vec3 position, vec3 direction) {
-        float dist = 0.;
+    float marcher(vec3 position, vec3 direction, float near, float far) {
+        float dist = near;
+        position += near * direction;
         for (int iStep=0; iStep<MAX_STEPS; iStep++) {
             float safeMarchDist = distCombine(position);
-            if (safeMarchDist > MIN_DIST && dist < MAX_DIST) {
+            if (safeMarchDist > MIN_DIST && dist < MAX_DIST && dist < far) {
                 position += safeMarchDist * direction;
                 dist += safeMarchDist;
             } else {
@@ -86,131 +91,226 @@ const frag = `
         return 0.;
     }
 
+    // Normal Test
+    vec3 marchNormal(vec3 position, vec3 direction, float near, float far) {
+        float xChange = marcher(position + vec3(NORM_EPS, 0, 0), direction, near, far) - marcher(position - vec3(NORM_EPS, 0, 0), direction, near, far);
+        float yChange = marcher(position + vec3(0, NORM_EPS, 0), direction, near, far) - marcher(position - vec3(0, NORM_EPS, 0), direction, near, far);
+        float zChange = marcher(position + vec3(0, 0, NORM_EPS), direction, near, far) - marcher(position - vec3(0, 0, NORM_EPS), direction, near, far);
+        return normalize( vec3(xChange, yChange, zChange) );
+    }
+
+    // tpmsGradient instead of normal (maybe the same??)
+    vec3 tpmsGradBeam(vec3 position, float gyroidFactor) {
+        vec3 change;
+        change.x = (distGyroidBeam( position + vec3(NORM_EPS, 0, 0), gyroidFactor) - distGyroidBeam( position - vec3(NORM_EPS, 0, 0), gyroidFactor));
+        change.y = (distGyroidBeam( position + vec3(0, NORM_EPS, 0), gyroidFactor) - distGyroidBeam( position - vec3(0, NORM_EPS, 0), gyroidFactor)); 
+        change.z = (distGyroidBeam( position + vec3(0, 0, NORM_EPS), gyroidFactor) - distGyroidBeam( position - vec3(0, 0, NORM_EPS), gyroidFactor)); 
+        return normalize( change );
+    }
+
+
     // Camera Fragment Position (Orthographic)
-    vec3 orthoFragPos(vec2 fragCoord) {
+    vec3 orthoFragPos(vec2 fragCoord, vec3 cameraDir, vec3 cameraPos) {
+
+        // Ortho Pixel Pos Adj
         vec3 initialUp = vec3(0.0, 1.0, 0.0);
-        if (uCameraDir.x == 0.0 && uCameraDir.z == 0.0 && uCameraDir.y != 0.0) {
+        if (cameraDir.x == 0.0 && cameraDir.z == 0.0 && cameraDir.y != 0.0) {
             initialUp = vec3(0.0, 0.0, 1.0);
         }
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
-        vec2 offset = (uv * uCameraSize) - (uCameraSize * 0.5);
-        vec3 rightChange = normalize(cross(uCameraDir, initialUp));
-        vec3 upChange = normalize(cross(rightChange, uCameraDir));
+        vec2 offset = (uv * uCameraSize / uCameraZoom) - (uCameraSize / uCameraZoom * 0.5);
+        vec3 rightChange = normalize(cross(cameraDir, initialUp));
+        vec3 upChange = normalize(cross(rightChange, cameraDir));
         vec3 worldOffset = offset.x * rightChange + offset.y * upChange;
-        return uCameraPos + worldOffset;
-        // return vec3(offset/50., 0.0);
+        return cameraPos + worldOffset;
+    }
+
+    // RGBA unpacking
+    float unpackRGBAToDepth(vec4 color) {
+  const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
+        return depth;
     }
 
     void main() {
-        
+
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
-        vec4 frontDepth = texture2D( uFrontTexture, uv);
-        vec4 backDepth = texture2D( uBackTexture, uv);
         
-        vec3 fragPos = orthoFragPos(gl_FragCoord.xy);
-        // gl_FragColor = vec4(fragPos/50., 1.0);
+        // float frontDepth = texture2D( uFrontTexture, uv).r;
+        float frontDepth = unpackRGBAToDepth(texture2D( uFrontTexture, uv));
+        frontDepth = uCameraNear + (frontDepth)*uCameraFar;
+
+        // float backDepth = texture2D( uBackTexture, uv).r;
+        float backDepth = unpackRGBAToDepth(texture2D( uBackTexture, uv));
+        backDepth = uCameraNear + (backDepth)*uCameraFar;
+        // TODO Depth Packing
+        
+        // adjust camera position and direction
+        vec3 cameraDir = normalize(-uCameraPos);
+        vec3 fragPos = orthoFragPos(gl_FragCoord.xy, cameraDir, uCameraPos);
 
         vec3 col = vec3(0.0);
 
         // Ray March
-        float objDist = marcher(fragPos.xyz, uCameraDir);
-        vec3 objPos = fragPos + uCameraDir * objDist;
+        float objDist = marcher(fragPos.xyz, cameraDir, frontDepth, backDepth);
+        vec3 objPos = fragPos + cameraDir * objDist;
         
-        if (objDist < MAX_DIST) {
-            col = vec3(1.0);
+        if (objDist < MAX_DIST && objDist < backDepth) {
+
+            // Find Normal
+            vec3 normal;
+            if (objDist == frontDepth) {
+                // normal of mesh obj
+                normal = vNormal;
+            } else if (distGyroidBeam(objPos, gyroidFactor) < MIN_DIST) {
+                // normal of gyroid
+                // normal = tpmsGradBeam(fragPos.xyz, gyroidFactor);
+                normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
+            } else {
+                // normal of other SDF
+                normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
+            }
+            // col = vec3(normal);
+
+            // Ambient Lighting
+            vec3 ambiLight = lightCol * ambiStrength;
+            
+            // Diffuse Lighting
+            vec3 diffDir = normalize(lightPos - objPos);
+            vec3 diffLight = lightCol * diffStength * max(dot(normal, diffDir), 0.0);
+            
+            // Specular Lighting
+            vec3 reflDir = reflect(-diffDir, normal);
+            float specFact = pow(max(dot(-cameraDir, reflDir), 0.0), specPow);
+            vec3 specLight = lightCol * specStrength * specFact;
+            
+            // Phong Combined Lighting
+            vec3 combLight = ambiLight + diffLight + specLight;
+            col = combLight * objCol;
             
         }
         
+        // col = vec3(backDepth/100.);
         gl_FragColor = vec4(vec3(col), 1.0);
     }
 `
 
-const scene = new THREE.Scene()
+// Globals
+let scene, frontScene, backScene
+let renderTargetBack, renderTargetFront
+let renderer, camera, controls, stats
 
-let width = window.innerWidth
-let height = window.innerHeight
-// const camera = new THREE.PerspectiveCamera( 10, window.innerWidth / window.innerHeight, 1, 2000 )
-const dpmm = 20
-const camera = new THREE.OrthographicCamera(-width/(2*dpmm), width/(2*dpmm), height/(2*dpmm), -height/(2*dpmm), 0, 100)
-camera.position.set(25, 25, 25)
-scene.add(camera)
+// Setup
+const Init = () => {
+    
+    // Consts
+    const dpmm = 25
+    const cameraNear = 0
+    const cameraFar = 100
+    
+    // Window Params
+    let width = window.innerWidth
+    let height = window.innerHeight
+    
+    // Scene, Renderer, Controls
+    scene = new THREE.Scene()
+    camera = new THREE.OrthographicCamera(-width/(2*dpmm), width/(2*dpmm), height/(2*dpmm), -height/(2*dpmm), cameraNear, cameraFar)
+    camera.position.set(20, 20, 20)
+    scene.add(camera)
 
-const renderer = new THREE.WebGLRenderer()
-renderer.setSize(window.innerWidth, window.innerHeight)
-renderer.autoClear = false;
-document.body.appendChild(renderer.domElement)
+    renderer = new THREE.WebGLRenderer()
+    renderer.setSize(window.innerWidth, window.innerHeight)
+    renderer.autoClear = false;
+    document.body.appendChild(renderer.domElement)
 
-const controls = new OrbitControls(camera, renderer.domElement)
+    controls = new OrbitControls(camera, renderer.domElement)
+    controls.mouseButtons.RIGHT = '' // disable pan
 
-// Render Targets and Secondary Scenes
-const renderTargetFront = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-  })
-const renderTargetBack = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-  })
-const frontScene = new THREE.Scene()
-const backScene = new THREE.Scene()
+    // Render Targets and Secondary Scenes
+    renderTargetFront = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+    })
+    renderTargetBack = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+    })
+    frontScene = new THREE.Scene()
+    backScene = new THREE.Scene()
 
-// Model
-const geometry = new RoundedBoxGeometry(20, 20, 20, 10, 5)
+    // Model
+    const geometry = new RoundedBoxGeometry(20, 20, 20, 10, 5)
 
-// Depth Renders
-const depthMatFront = new THREE.MeshDepthMaterial()
-depthMatFront.side = THREE.FrontSide
-const depthMeshFront = new THREE.Mesh(geometry, depthMatFront)
-frontScene.add(depthMeshFront);
+    // Depth Renders
+    // Front depth will track where the fragment hits the mesh (first time only)
+    const depthMatFront = new THREE.MeshDepthMaterial()
+    depthMatFront.side = THREE.FrontSide
+    depthMatFront.depthPacking = THREE.RGBADepthPacking // better, but needs to be unpacked in shader
+    const depthMeshFront = new THREE.Mesh(geometry, depthMatFront)
+    frontScene.add(depthMeshFront)
 
-const depthMatBack = new THREE.MeshDepthMaterial()
-depthMatBack.side = THREE.BackSide
-const depthMeshBack = new THREE.Mesh(geometry, depthMatBack)
-backScene.add(depthMeshBack);
+    // Back depth will track where the fragment exits the mesh (first time only)
+    const depthMatBack = new THREE.MeshDepthMaterial()
+    depthMatBack.side = THREE.BackSide
+    depthMatBack.depthPacking = THREE.RGBADepthPacking
+    const depthMeshBack = new THREE.Mesh(geometry, depthMatBack)
+    backScene.add(depthMeshBack)
 
-// get camera direction
-const cameraDir = new THREE.Vector3();
-camera.getWorldDirection(cameraDir)
-console.log(cameraDir)
+    // Shader Material & Mesh
+    const material = new THREE.ShaderMaterial({
+        uniforms: {
+            'uFrontTexture': { 'value': renderTargetFront.texture },
+            'uBackTexture': { 'value': renderTargetBack.texture },
+            'uCameraPos': { 'value': camera.position },
+            'uCameraSize': { 'value': new THREE.Vector2(width/dpmm, height/dpmm)},
+            'uCameraNear': { 'value': cameraNear },
+            'uCameraFar': { 'value': cameraFar },
+            'uCameraZoom': { 'value': camera.zoom }
+        },
+        vertexShader: vert,
+        fragmentShader: frag
+    })
+    console.log(material.uniforms)
+    const cube = new THREE.Mesh(geometry, material)
+    scene.add(cube)
 
-// Shader Material
-const material = new THREE.ShaderMaterial({
-    uniforms: {
-        'uFrontTexture': { 'value': renderTargetFront.texture },
-        'uBackTexture': { 'value': renderTargetBack.texture },
-        'uCameraPos': { 'value': camera.position },
-        'uCameraDir': { 'value': cameraDir },
-        'uCameraSize': { 'value': new THREE.Vector2(width/dpmm, height/dpmm)}
-    },
-    vertexShader: vert,
-    fragmentShader: frag
-})
-console.log(material.uniforms)
-const cube = new THREE.Mesh(geometry, material)
-scene.add(cube)
+    // Controls Change Event Listener
+    controls.addEventListener('change', ()=>{
+        console.log(controls)
+        console.log(camera)
+        material.uniforms.uCameraPos.value = camera.position
+        material.uniforms.uCameraZoom.value = camera.zoom
+        console.log(material.uniforms)
+    })
 
-window.addEventListener(
-    'resize',
-    () => {
-        width = window.innerWidth
-        height = window.innerHeight
-        camera.aspect = width/height
-        camera.updateProjectionMatrix()
-        renderer.setSize(width, height)
-        render()
-    },
-    false
-)
+    // Window Resize Event Listener
+    window.addEventListener(
+        'resize',
+        () => {
+            width = window.innerWidth
+            height = window.innerHeight
+            camera.aspect = width/height
+            camera.updateProjectionMatrix()
+            material.uniforms.uCameraSize.value = new THREE.Vector2(width/dpmm, height/dpmm)
+            renderer.setSize(width, height)
+            render()
+        },
+        false
+    )
 
-const stats = Stats()
-document.body.appendChild(stats.dom)
+    // FPS Stats
+    stats = Stats()
+    document.body.appendChild(stats.dom)
 
-// const gui = new GUI()
-// const cubeFolder = gui.addFolder('Cube')
-// cubeFolder.add(cube.scale, 'x', -5, 5)
-// cubeFolder.add(cube.scale, 'y', -5, 5)
-// cubeFolder.add(cube.scale, 'z', -5, 5)
+    // UI
+    // const gui = new GUI()
+    // const cubeFolder = gui.addFolder('Cube')
+    // cubeFolder.add(cube.scale, 'x', -5, 5)
+    // cubeFolder.add(cube.scale, 'y', -5, 5)
+    // cubeFolder.add(cube.scale, 'z', -5, 5)
 
+}
+
+// Cycle Animation
 function animate() {
     requestAnimationFrame(animate)
     controls.update()
@@ -218,6 +318,7 @@ function animate() {
     stats.update()
 }
 
+// Render one frame
 function render() {
     
     // render targets
@@ -235,4 +336,6 @@ function render() {
     renderer.render(scene, camera)
 }
 
+// Start!
+Init()
 animate()
