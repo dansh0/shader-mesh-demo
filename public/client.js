@@ -25,7 +25,6 @@ const frag = `
     #define MAX_DIST 200.
     #define MIN_DIST 0.01
     #define STEP_SIZE 0.02
-    #define DOTS_PER_MM 25.
     #define NORM_EPS 0.01
     #define PI 3.141592
     #define TAU 6.283185
@@ -42,7 +41,7 @@ const frag = `
     uniform float uCameraFar;
     uniform float uCameraZoom;
 
-    // PARAMS
+    // Declare Parameters
     float scale = 2.0; // Geo scale
     vec3 objCol = vec3(1.0, 1.0, 1.0); // Base material color
     vec3 lightCol = vec3(1.0, 1.0, 1.0); // Light color
@@ -53,90 +52,36 @@ const frag = `
     float specPow = 4.0; // Specular light power (spread)
     float gyroidFactor = 0.8; // Factor for shape of gyroid
 
-    // GEOMETRY
-
-    // Gyroid Beam
-    float distGyroidBeam(vec3 point, float gyroidFactor) {
+    // Gyroid SDF
+    float distGyroidBeam(vec3 point) {
         point *= scale;
         return (dot(sin(point), cos(point.zxy))) + gyroidFactor;
     }
 
-
-    // GEOMETRY COMBINATIONS
-
-    // Distance Function Combine
-    float distCombine( vec3 position ) {
-        
-        // geometry
-        
-        float beamDist = distGyroidBeam( position, gyroidFactor);
-        return beamDist / uCameraZoom;
-    }     
-
-        
-    // RAY TOOLS
-
-    // Ray March
-    // float marcher(vec3 position, vec3 direction, float near, float far) {
-    //     float dist = near;
-    //     position += near * direction;
-    //     for (int iStep=0; iStep<MAX_STEPS; iStep++) {
-    //         float safeMarchDist = distCombine(position);
-    //         if (safeMarchDist > MIN_DIST && dist < MAX_DIST && dist < far) {
-    //             position += safeMarchDist * direction;
-    //             dist += safeMarchDist;
-    //         } else {
-    //             return dist;
-    //             // return float(iStep);
-    //         }
-    //     }
-    //     return 0.;
-    // }
-
-    // Ray March
-    float marcher(vec3 position, vec3 direction, float near, float far) {
+    // Fixed Step Ray Marcher
+    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far) {
         float dist = near;
         position += near * direction;
         for (int iStep=0; iStep<MAX_STEPS; iStep++) {
-            float distToGeo = distCombine(position);
+            float distToGeo = distGyroidBeam(position);
             if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
                 position += STEP_SIZE * direction;
                 dist += STEP_SIZE;
             } else {
                 return dist;
-                // return float(iStep);
             }
         }
         return 0.;
     }
 
-    // Normal Test
-    vec3 marchNormal(vec3 position, vec3 direction, float near, float far) {
-        float xChange = marcher(position + vec3(NORM_EPS, 0, 0), direction, near, far) - marcher(position - vec3(NORM_EPS, 0, 0), direction, near, far);
-        float yChange = marcher(position + vec3(0, NORM_EPS, 0), direction, near, far) - marcher(position - vec3(0, NORM_EPS, 0), direction, near, far);
-        float zChange = marcher(position + vec3(0, 0, NORM_EPS), direction, near, far) - marcher(position - vec3(0, 0, NORM_EPS), direction, near, far);
-        return normalize( vec3(xChange, yChange, zChange) );
-    }
-
-    // tpmsGradient instead of normal (maybe the same??)
+    // Gyroid Beam Gradient (For Normal)
     vec3 tpmsGradBeam(vec3 position, float gyroidFactor) {
         vec3 change;
-        change.x = (distGyroidBeam( position + vec3(NORM_EPS, 0, 0), gyroidFactor) - distGyroidBeam( position - vec3(NORM_EPS, 0, 0), gyroidFactor));
-        change.y = (distGyroidBeam( position + vec3(0, NORM_EPS, 0), gyroidFactor) - distGyroidBeam( position - vec3(0, NORM_EPS, 0), gyroidFactor)); 
-        change.z = (distGyroidBeam( position + vec3(0, 0, NORM_EPS), gyroidFactor) - distGyroidBeam( position - vec3(0, 0, NORM_EPS), gyroidFactor)); 
+        change.x = (distGyroidBeam( position + vec3(NORM_EPS, 0, 0)) - distGyroidBeam( position - vec3(NORM_EPS, 0, 0)));
+        change.y = (distGyroidBeam( position + vec3(0, NORM_EPS, 0)) - distGyroidBeam( position - vec3(0, NORM_EPS, 0))); 
+        change.z = (distGyroidBeam( position + vec3(0, 0, NORM_EPS)) - distGyroidBeam( position - vec3(0, 0, NORM_EPS))); 
         return normalize( change );
     }
-
-    vec3 normalGyroidBeam(vec3 position) {
-        vec3 grad = vec3(
-            cos(position.z) * cos(position.x),
-            cos(position.x) * cos(position.y),
-            -sin(position.y) * sin(position.z)
-        );
-
-        return normalize(grad);
-    }
-
 
     // Camera Fragment Position (Orthographic)
     vec3 orthoFragPos(vec2 fragCoord, vec3 cameraDir, vec3 cameraPos) {
@@ -154,7 +99,7 @@ const frag = `
         return cameraPos + worldOffset;
     }
 
-    // RGBA unpacking
+    // RGBA Unpacking
     float unpackRGBAToDepth(vec4 color) {
         const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
         return depth;
@@ -162,43 +107,38 @@ const frag = `
 
     void main() {
 
+        // Find Front and Back Depth from Textures
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
-        
-        // float frontDepth = texture2D( uFrontTexture, uv).r;
+
         float frontDepth = unpackRGBAToDepth(texture2D( uFrontTexture, uv));
         frontDepth = uCameraNear + (frontDepth)*uCameraFar;
 
-        // float backDepth = texture2D( uBackTexture, uv).r;
         float backDepth = unpackRGBAToDepth(texture2D( uBackTexture, uv));
         backDepth = uCameraNear + (backDepth)*uCameraFar;
-        // TODO Depth Packing
         
-        // adjust camera position and direction
+        // Find Camera Angle
         vec3 cameraDir = normalize(-uCameraPos);
         vec3 fragPos = orthoFragPos(gl_FragCoord.xy, cameraDir, uCameraPos);
 
+        // Background is Black
         vec3 col = vec3(0.0);
 
-        // Ray March
-        float objDist = marcher(fragPos.xyz, cameraDir, frontDepth, backDepth);
+        // Ray March to Find Object Position (Fixed Step)
+        float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepth, backDepth);
         vec3 objPos = fragPos + cameraDir * objDist;
-        // col = vec3(objDist/50.);
 
+        // If Object Solve Lighting
         if (objDist < MAX_DIST && objDist < backDepth) {
 
             // Find Normal
             vec3 normal;
             if (objDist == frontDepth) {
-                // normal of mesh obj
+                // Normal of Mesh Obj
                 normal = vNormal;
             } else {
-                // normal of gyroid
+                // Normal of Gyroid
                 normal = tpmsGradBeam(objPos, gyroidFactor);
-                // normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
-                // normal = normalGyroidBeam(objPos);
             }
-
-            col = vec3(normal);
 
             // Ambient Lighting
             vec3 ambiLight = lightCol * ambiStrength;
@@ -218,12 +158,12 @@ const frag = `
             
         }
         
-        // col = vec3(backDepth/100.);
+        // Output Fragment
         gl_FragColor = vec4(vec3(col), 1.0);
     }
 `
 
-// Globals
+// JS Globals
 let scene, frontScene, backScene
 let renderTargetBack, renderTargetFront
 let renderer, camera, controls, stats
@@ -232,9 +172,9 @@ let renderer, camera, controls, stats
 const Init = () => {
     
     // Consts
-    const dpmm = 25
-    const cameraNear = 0
-    const cameraFar = 100
+    const dpmm = 25 // dots per mm
+    const cameraNear = 0 // mm
+    const cameraFar = 100 // mm
     
     // Window Params
     let width = window.innerWidth
