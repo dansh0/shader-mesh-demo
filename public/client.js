@@ -21,11 +21,12 @@ const vert = `
 `
 
 const frag = `
-    #define MAX_STEPS 100000
+    #define MAX_STEPS 10000
     #define MAX_DIST 200.
-    #define MIN_DIST 0.001
+    #define MIN_DIST 0.01
+    #define STEP_SIZE 0.02
     #define DOTS_PER_MM 25.
-    #define NORM_EPS 0.001
+    #define NORM_EPS 0.01
     #define PI 3.141592
     #define TAU 6.283185
 
@@ -50,7 +51,7 @@ const frag = `
     float diffStength = 0.4; // Diffuse light strength
     float specStrength = 0.2; // Specular light strength
     float specPow = 4.0; // Specular light power (spread)
-    float gyroidFactor = 0.6; // Factor for shape of gyroid
+    float gyroidFactor = 0.8; // Factor for shape of gyroid
 
     // GEOMETRY
 
@@ -76,16 +77,34 @@ const frag = `
     // RAY TOOLS
 
     // Ray March
+    // float marcher(vec3 position, vec3 direction, float near, float far) {
+    //     float dist = near;
+    //     position += near * direction;
+    //     for (int iStep=0; iStep<MAX_STEPS; iStep++) {
+    //         float safeMarchDist = distCombine(position);
+    //         if (safeMarchDist > MIN_DIST && dist < MAX_DIST && dist < far) {
+    //             position += safeMarchDist * direction;
+    //             dist += safeMarchDist;
+    //         } else {
+    //             return dist;
+    //             // return float(iStep);
+    //         }
+    //     }
+    //     return 0.;
+    // }
+
+    // Ray March
     float marcher(vec3 position, vec3 direction, float near, float far) {
         float dist = near;
         position += near * direction;
         for (int iStep=0; iStep<MAX_STEPS; iStep++) {
-            float safeMarchDist = distCombine(position);
-            if (safeMarchDist > MIN_DIST && dist < MAX_DIST && dist < far) {
-                position += safeMarchDist * direction;
-                dist += safeMarchDist;
+            float distToGeo = distCombine(position);
+            if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
+                position += STEP_SIZE * direction;
+                dist += STEP_SIZE;
             } else {
                 return dist;
+                // return float(iStep);
             }
         }
         return 0.;
@@ -108,6 +127,16 @@ const frag = `
         return normalize( change );
     }
 
+    vec3 normalGyroidBeam(vec3 position) {
+        vec3 grad = vec3(
+            cos(position.z) * cos(position.x),
+            cos(position.x) * cos(position.y),
+            -sin(position.y) * sin(position.z)
+        );
+
+        return normalize(grad);
+    }
+
 
     // Camera Fragment Position (Orthographic)
     vec3 orthoFragPos(vec2 fragCoord, vec3 cameraDir, vec3 cameraPos) {
@@ -127,7 +156,7 @@ const frag = `
 
     // RGBA unpacking
     float unpackRGBAToDepth(vec4 color) {
-  const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
+        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
         return depth;
     }
 
@@ -153,7 +182,8 @@ const frag = `
         // Ray March
         float objDist = marcher(fragPos.xyz, cameraDir, frontDepth, backDepth);
         vec3 objPos = fragPos + cameraDir * objDist;
-        
+        // col = vec3(objDist/50.);
+
         if (objDist < MAX_DIST && objDist < backDepth) {
 
             // Find Normal
@@ -161,15 +191,14 @@ const frag = `
             if (objDist == frontDepth) {
                 // normal of mesh obj
                 normal = vNormal;
-            } else if (distGyroidBeam(objPos, gyroidFactor) < MIN_DIST) {
-                // normal of gyroid
-                // normal = tpmsGradBeam(fragPos.xyz, gyroidFactor);
-                normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
             } else {
-                // normal of other SDF
-                normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
+                // normal of gyroid
+                normal = tpmsGradBeam(objPos, gyroidFactor);
+                // normal = marchNormal(fragPos.xyz, cameraDir, frontDepth, backDepth);
+                // normal = normalGyroidBeam(objPos);
             }
-            // col = vec3(normal);
+
+            col = vec3(normal);
 
             // Ambient Lighting
             vec3 ambiLight = lightCol * ambiStrength;
@@ -280,6 +309,7 @@ const Init = () => {
         material.uniforms.uCameraPos.value = camera.position
         material.uniforms.uCameraZoom.value = camera.zoom
         console.log(material.uniforms)
+        animate()
     })
 
     // Window Resize Event Listener
@@ -312,8 +342,9 @@ const Init = () => {
 
 // Cycle Animation
 function animate() {
-    requestAnimationFrame(animate)
-    controls.update()
+    // requestAnimationFrame(animate)
+    // controls.update()
+    render()
     render()
     stats.update()
 }
@@ -339,3 +370,4 @@ function render() {
 // Start!
 Init()
 animate()
+// setTimeout(render, 100)
