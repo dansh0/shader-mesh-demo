@@ -24,7 +24,6 @@ const frag = `
     #define MAX_STEPS 10000
     #define MAX_DIST 200.
     #define MIN_DIST 0.01
-    #define STEP_SIZE 0.02
     #define NORM_EPS 0.01
     #define PI 3.141592
     #define TAU 6.283185
@@ -40,12 +39,14 @@ const frag = `
     uniform float uCameraNear;
     uniform float uCameraFar;
     uniform float uCameraZoom;
+    uniform float uStepSize;
+    uniform float uCellSize;
+    uniform vec3 uColor;
+    uniform float uLightTheta;
+    uniform float uLightPhi;
+    uniform vec3 uLightCol;
 
     // Declare Parameters
-    float scale = 2.0; // Geo scale
-    vec3 objCol = vec3(1.0, 1.0, 1.0); // Base material color
-    vec3 lightCol = vec3(1.0, 1.0, 1.0); // Light color
-    vec3 lightPos = vec3(50.); // Light source position
     float ambiStrength = 0.4; // Ambient light strength
     float diffStength = 0.4; // Diffuse light strength
     float specStrength = 0.2; // Specular light strength
@@ -53,20 +54,20 @@ const frag = `
     float gyroidFactor = 0.8; // Factor for shape of gyroid
 
     // Gyroid SDF
-    float distGyroidBeam(vec3 point) {
+    float distGyroidBeam(vec3 point, float scale) {
         point *= scale;
         return (dot(sin(point), cos(point.zxy))) + gyroidFactor;
     }
 
     // Fixed Step Ray Marcher
-    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far) {
+    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far, float scale) {
         float dist = near;
         position += near * direction;
         for (int iStep=0; iStep<MAX_STEPS; iStep++) {
-            float distToGeo = distGyroidBeam(position);
+            float distToGeo = distGyroidBeam(position, scale);
             if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
-                position += STEP_SIZE * direction;
-                dist += STEP_SIZE;
+                position += uStepSize * direction;
+                dist += uStepSize;
             } else {
                 return dist;
             }
@@ -75,11 +76,11 @@ const frag = `
     }
 
     // Gyroid Beam Gradient (For Normal)
-    vec3 tpmsGradBeam(vec3 position, float gyroidFactor) {
+    vec3 tpmsGradBeam(vec3 position, float gyroidFactor, float scale) {
         vec3 change;
-        change.x = (distGyroidBeam( position + vec3(NORM_EPS, 0, 0)) - distGyroidBeam( position - vec3(NORM_EPS, 0, 0)));
-        change.y = (distGyroidBeam( position + vec3(0, NORM_EPS, 0)) - distGyroidBeam( position - vec3(0, NORM_EPS, 0))); 
-        change.z = (distGyroidBeam( position + vec3(0, 0, NORM_EPS)) - distGyroidBeam( position - vec3(0, 0, NORM_EPS))); 
+        change.x = (distGyroidBeam( position + vec3(NORM_EPS, 0, 0), scale) - distGyroidBeam( position - vec3(NORM_EPS, 0, 0), scale));
+        change.y = (distGyroidBeam( position + vec3(0, NORM_EPS, 0), scale) - distGyroidBeam( position - vec3(0, NORM_EPS, 0), scale)); 
+        change.z = (distGyroidBeam( position + vec3(0, 0, NORM_EPS), scale) - distGyroidBeam( position - vec3(0, 0, NORM_EPS), scale)); 
         return normalize( change );
     }
 
@@ -107,6 +108,9 @@ const frag = `
 
     void main() {
 
+        // Determine Gyroid Geometry Scale
+        float scale = 2.0*PI/uCellSize; // Geo scale
+
         // Find Front and Back Depth from Textures
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
 
@@ -124,7 +128,7 @@ const frag = `
         vec3 col = vec3(0.0);
 
         // Ray March to Find Object Position (Fixed Step)
-        float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepth, backDepth);
+        float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepth, backDepth, scale);
         vec3 objPos = fragPos + cameraDir * objDist;
 
         // If Object Solve Lighting
@@ -137,24 +141,30 @@ const frag = `
                 normal = vNormal;
             } else {
                 // Normal of Gyroid
-                normal = tpmsGradBeam(objPos, gyroidFactor);
+                normal = tpmsGradBeam(objPos, gyroidFactor, scale);
             }
 
+            // Adjust Light Position
+            float lRadius = 25.0;
+            float lPhi = uLightPhi;
+            float lTheta = uLightTheta;
+            vec3 lightPos = vec3(lRadius*sin(lPhi)*cos(lTheta), lRadius*cos(lPhi), lRadius*sin(lPhi)*sin(lTheta));
+
             // Ambient Lighting
-            vec3 ambiLight = lightCol * ambiStrength;
+            vec3 ambiLight = vec3(1.) * ambiStrength;
             
             // Diffuse Lighting
             vec3 diffDir = normalize(lightPos - objPos);
-            vec3 diffLight = lightCol * diffStength * max(dot(normal, diffDir), 0.0);
+            vec3 diffLight = uLightCol * diffStength * max(dot(normal, diffDir), 0.0);
             
             // Specular Lighting
             vec3 reflDir = reflect(-diffDir, normal);
             float specFact = pow(max(dot(-cameraDir, reflDir), 0.0), specPow);
-            vec3 specLight = lightCol * specStrength * specFact;
+            vec3 specLight = uLightCol * specStrength * specFact;
             
             // Phong Combined Lighting
             vec3 combLight = ambiLight + diffLight + specLight;
-            col = combLight * objCol;
+            col = combLight * uColor;
             
         }
         
@@ -167,6 +177,16 @@ const frag = `
 let scene, frontScene, backScene
 let renderTargetBack, renderTargetFront
 let renderer, camera, controls, stats
+
+// Calc Light Position
+const lightPosition = (phi, theta) => {
+    let radius = 25.0;
+    return [
+        radius*Math.sin(phi)*Math.cos(theta), 
+        radius*Math.cos(phi),
+        radius*Math.sin(phi)*Math.sin(theta)
+    ]
+}
 
 // Setup
 const Init = () => {
@@ -183,7 +203,7 @@ const Init = () => {
     // Scene, Renderer, Controls
     scene = new THREE.Scene()
     camera = new THREE.OrthographicCamera(-width/(2*dpmm), width/(2*dpmm), height/(2*dpmm), -height/(2*dpmm), cameraNear, cameraFar)
-    camera.position.set(20, 20, 20)
+    camera.position.set(25, 15, 20)
     scene.add(camera)
 
     renderer = new THREE.WebGLRenderer()
@@ -207,7 +227,17 @@ const Init = () => {
     backScene = new THREE.Scene()
 
     // Model
-    const geometry = new RoundedBoxGeometry(20, 20, 20, 10, 5)
+    let meshConfigs = {
+        'geometry': 'sphere',
+        'lightColor': [1.0, 1.0, 1.0]
+    }
+    const geometries = {
+        box: new RoundedBoxGeometry(20, 20, 20, 10, 5),
+        flatBox: new RoundedBoxGeometry(2, 20, 20, 10, 5),
+        sphere: new THREE.SphereGeometry(10),
+        torus: new THREE.TorusGeometry(10, 4, 16, 100),
+    }
+    let geometry = geometries[meshConfigs.geometry]
 
     // Depth Renders
     // Front depth will track where the fragment hits the mesh (first time only)
@@ -225,6 +255,13 @@ const Init = () => {
     backScene.add(depthMeshBack)
 
     // Shader Material & Mesh
+    const shaderConfigs = {
+        'stepSize': 0.02,
+        'cellSize': 4,
+        'lightTheta': Math.PI/4,
+        'lightPhi': Math.PI/3,
+        'color': [0.8,0.8,0.8]
+    }
     const material = new THREE.ShaderMaterial({
         uniforms: {
             'uFrontTexture': { 'value': renderTargetFront.texture },
@@ -233,22 +270,44 @@ const Init = () => {
             'uCameraSize': { 'value': new THREE.Vector2(width/dpmm, height/dpmm)},
             'uCameraNear': { 'value': cameraNear },
             'uCameraFar': { 'value': cameraFar },
-            'uCameraZoom': { 'value': camera.zoom }
+            'uCameraZoom': { 'value': camera.zoom },
+            'uStepSize': { 'value': shaderConfigs.stepSize },
+            'uCellSize': { 'value': shaderConfigs.cellSize },
+            'uColor': { 'value': shaderConfigs.color },
+            'uLightTheta': { 'value': shaderConfigs.lightTheta },
+            'uLightPhi': { 'value': shaderConfigs.lightPhi },
+            'uLightCol': { 'value': meshConfigs.lightColor }
         },
         vertexShader: vert,
         fragmentShader: frag
     })
     console.log(material.uniforms)
-    const cube = new THREE.Mesh(geometry, material)
-    scene.add(cube)
+    const mesh = new THREE.Mesh(geometry, material)
+    scene.add(mesh)
+
+    // Light Object 
+    // from https://github.com/mrdoob/three.js/blob/master/examples/webgl_lights_physical.html)
+    const bulbGeometry = new THREE.SphereGeometry( 0.1, 16, 8 );
+    const bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 );
+
+    const bulbMat = new THREE.MeshStandardMaterial( {
+        emissive: 0xffffff,
+        emissiveIntensity: 1,
+        color: 0x000000
+    } );
+    console.log(bulbMat)
+    bulbLight.add( new THREE.Mesh( bulbGeometry, bulbMat ) );
+    bulbLight.castShadow = true;
+    scene.add( bulbLight );
+
+    // Adjust Light Position
+    let lightPos = lightPosition(shaderConfigs.lightTheta)
+    bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
 
     // Controls Change Event Listener
-    controls.addEventListener('change', ()=>{
-        console.log(controls)
-        console.log(camera)
+    controls.addEventListener('change', () => {
         material.uniforms.uCameraPos.value = camera.position
         material.uniforms.uCameraZoom.value = camera.zoom
-        console.log(material.uniforms)
         animate()
     })
 
@@ -272,11 +331,46 @@ const Init = () => {
     document.body.appendChild(stats.dom)
 
     // UI
-    // const gui = new GUI()
-    // const cubeFolder = gui.addFolder('Cube')
-    // cubeFolder.add(cube.scale, 'x', -5, 5)
-    // cubeFolder.add(cube.scale, 'y', -5, 5)
-    // cubeFolder.add(cube.scale, 'z', -5, 5)
+    const gui = new GUI()
+    const sceneFolder = gui.addFolder('Scene Configs')
+    sceneFolder.add(meshConfigs, 'geometry', Object.keys(geometries)).onChange( value => {
+        mesh.geometry = geometries[value]
+        depthMeshBack.geometry = geometries[value]
+        depthMeshFront.geometry = geometries[value]
+        animate()
+    })
+    sceneFolder.addColor({lightColor:meshConfigs.lightColor}, 'lightColor').onChange( value => {
+        material.uniforms.uLightCol.value = value
+        bulbMat.emissive = new THREE.Color(value[0], value[1], value[2])
+        console.log(bulbMat)
+        animate()
+    })
+    sceneFolder.add(shaderConfigs, 'lightTheta', 0, Math.PI*2).onChange( value => {
+        material.uniforms.uLightTheta.value = value
+        lightPos = lightPosition(shaderConfigs.lightPhi, value)
+        bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
+        animate()
+    })
+    // sceneFolder.add(shaderConfigs, 'lightPhi', 0, Math.PI).onChange( value => {
+    //     material.uniforms.uLightPhi.value = value
+    //     lightPos = lightPosition(value, shaderConfigs.lightTheta)
+    //     bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
+    //     animate()
+    // })
+    const shaderFolder = gui.addFolder('Shader Configs')
+    shaderFolder.add(shaderConfigs, 'stepSize', 0.001, 0.1).onChange( value => { 
+        material.uniforms.uStepSize.value = value 
+        animate()
+    })
+    shaderFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
+        material.uniforms.uCellSize.value = value 
+        animate()
+    })
+    shaderFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
+        material.uniforms.uColor.value = value
+        animate()
+    })
+
 
 }
 
