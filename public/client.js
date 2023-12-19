@@ -1,10 +1,11 @@
 import * as THREE from 'three'
 import { OrbitControls } from './jsm/controls/OrbitControls.js'
 import { RoundedBoxGeometry } from './jsm/geometries/RoundedBoxGeometry.js'
-import { Reflector } from './jsm/objects/Reflector.js';
+import { TeapotGeometry } from './jsm/geometries/TeapotGeometry.js'
 import Stats from './jsm/libs/stats.module.js'
 import { GUI } from './jsm/libs/lil-gui.module.min.js'
 
+// Shaders!
 const vert = `
     varying vec2 vUv;
     varying vec3 vNormal;
@@ -33,27 +34,34 @@ const frag = `
     varying vec2 vUv;
     varying vec3 vWorldPos;
     varying vec3 vProjPos;
-    uniform sampler2D uFrontTexture;
-    uniform sampler2D uBackTexture;
-    uniform vec3 uCameraPos;
-    uniform vec2 uCameraSize;
-    uniform float uCameraNear;
-    uniform float uCameraFar;
-    uniform float uCameraZoom;
-    uniform float uStepSize;
-    uniform float uCellSize;
-    uniform vec3 uColor;
-    uniform float uLightTheta;
-    uniform float uLightPhi;
-    uniform vec3 uLightCol;
-    uniform int uGeoType;
-    uniform float uFillFactor;
+    uniform sampler2D uFrontTexture; // depth texture of front face
+    uniform sampler2D uBackTexture; // depth texture of back face
+    uniform vec3 uCameraPos; // camera position (can I use the built-in instead?)
+    uniform vec2 uCameraSize; // size of orthographic camera viewport
+    uniform float uCameraNear; // how close it captures (used for depth unpacking)
+    uniform float uCameraFar; // how far it captures
+    uniform float uCameraZoom; // zoom level
+    uniform float uStepSize; // how far one step goes in the fixed-step marcher
+    uniform float uCellSize; // size of one unit cell, not calibrated to any unit
+    uniform vec3 uColor; // color of geometry
+    uniform float uLightTheta; // theta angle of spherical light position
+    uniform float uLightPhi; // phi angle of spherical light position
+    uniform vec3 uLightCol; // color of light
+    uniform int uGeoType; // type of geo infill (e.g. gyroid, octet, etc)
+    uniform float uFillFactor; // thickness of infill, not calibrated to any unit (roughly 0 is empty and 1 is full)
+    uniform bool uToggleDisplacement; // bool of whether to use noise surface textures or not
+    uniform float uAdjustDisp; // how big the surface textures should be
 
     // Declare Parameters
     float ambiStrength = 0.4; // Ambient light strength
     float diffStength = 0.4; // Diffuse light strength
     float specStrength = 0.2; // Specular light strength
     float specPow = 4.0; // Specular light power (spread)
+    float noiseSize = 8.0; // How big the noise should be scaled
+    float noisePower = 0.01; // How much displacement in mm a value 1 noise reading should be
+    float noiseSize2 = 2.0; // How big the noise should be scaled
+    float noisePower2 = 0.5; // How much displacement in mm a value 1 noise reading should be
+
 
     // GEOMETRIES
 
@@ -74,7 +82,7 @@ const frag = `
         return abs(dot(vec3(1.), cos(point))) - uFillFactor*1.5;
     }
 
-    // 3D repition from HG_SDF https://mercury.sexy/hg_sdf/
+    // 3D repetition from HG_SDF https://mercury.sexy/hg_sdf/
     void pMod3(inout vec3 p, vec3 size) {
         p = mod(p + size*0.5, size) - size*0.5;
     }
@@ -85,6 +93,7 @@ const frag = `
     }
 
     float distOctet(vec3 position, float scale) {
+        // Octect is made up of many beams, and is repeated in 3d domain
         float spacing = 10.0/scale;
         float beamRadius = uFillFactor*2.0;
         
@@ -108,7 +117,6 @@ const frag = `
         if (positionShiftXZ.z > positionShiftXZ.y) { positionShiftXZ.yz = positionShiftXZ.zy; } 
 
         float beamAngles = distBeam(positionShiftXZ, normalize(vec3(1.0,1.0,0.0)), beamRadius);
-        
         
         pMod3( positionShiftXY, vec3(spacing));
         positionShiftXY = abs(positionShiftXY);
@@ -135,53 +143,6 @@ const frag = `
                 break;
         }
         return dist;
-    }
-
-    // Fixed Step Ray Marcher
-    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far, float scale) {
-        float dist = near;
-        position += near * direction;
-        for (int iStep=0; iStep<MAX_STEPS; iStep++) {
-            float distToGeo = distFill(position, scale);
-            if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
-                position += uStepSize * direction;
-                dist += uStepSize;
-            } else {
-                return dist;
-            }
-        }
-        return 0.;
-    }
-
-    // Gyroid Beam Gradient (For Normal)
-    vec3 tpmsGradBeam(vec3 position, float scale) {
-        vec3 change;
-        change.x = (distFill( position + vec3(NORM_EPS, 0, 0), scale) - distFill( position - vec3(NORM_EPS, 0, 0), scale));
-        change.y = (distFill( position + vec3(0, NORM_EPS, 0), scale) - distFill( position - vec3(0, NORM_EPS, 0), scale)); 
-        change.z = (distFill( position + vec3(0, 0, NORM_EPS), scale) - distFill( position - vec3(0, 0, NORM_EPS), scale)); 
-        return normalize( change );
-    }
-
-    // Camera Fragment Position (Orthographic)
-    vec3 orthoFragPos(vec2 fragCoord, vec3 cameraDir, vec3 cameraPos) {
-
-        // Ortho Pixel Pos Adj
-        vec3 initialUp = vec3(0.0, 1.0, 0.0);
-        if (cameraDir.x == 0.0 && cameraDir.z == 0.0 && cameraDir.y != 0.0) {
-            initialUp = vec3(0.0, 0.0, 1.0);
-        }
-        vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
-        vec2 offset = (uv * uCameraSize / uCameraZoom) - (uCameraSize / uCameraZoom * 0.5);
-        vec3 rightChange = normalize(cross(cameraDir, initialUp));
-        vec3 upChange = normalize(cross(rightChange, cameraDir));
-        vec3 worldOffset = offset.x * rightChange + offset.y * upChange;
-        return cameraPos + worldOffset;
-    }
-
-    // RGBA Unpacking
-    float unpackRGBAToDepth(vec4 color) {
-        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
-        return depth;
     }
 
     // 3D Simplex Noise
@@ -251,6 +212,68 @@ const frag = `
     }
     // End of 3D Simplex Noise Segment
 
+    // Fixed Step Ray Marcher
+    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far, float scale) {
+        float dist = near;
+        position += near * direction;
+        for (int iStep=0; iStep<MAX_STEPS; iStep++) {
+            float distToGeo = distFill(position, scale);
+            if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
+                position += uStepSize * direction;
+                dist += uStepSize;
+            } else {
+                return dist;
+            }
+        }
+        return 0.;
+    }
+
+    // Add Surface Noise for Bonus Texture
+    float noiseDisplacement(vec3 position) {
+        // Adds two frequencies of noise displacement to the surface
+        float displacement1 = (noisePower/(1.5*uAdjustDisp)) * (1.0 - (2.0 * simplex3d(position * uAdjustDisp*noiseSize / uCellSize)));
+        float displacement2 = (noisePower2/(1.5*uAdjustDisp)) * (1.0 - (2.0 * simplex3d(position * uAdjustDisp*noiseSize2 / uCellSize)));
+        float totalDisplacement = displacement1 + displacement2;
+        if (!uToggleDisplacement) {totalDisplacement = 0.0;}
+        return totalDisplacement;
+    }
+    
+    float distFillPlusNoiseDisp(vec3 position, float scale) {
+        return distFill(position, scale) + noiseDisplacement(position);
+    }
+
+    // Gyroid Beam Gradient (For Normal)
+    vec3 tpmsGradBeam(vec3 position, float scale) {
+        vec3 change;
+        change.x = (distFillPlusNoiseDisp( position + vec3(NORM_EPS, 0, 0), scale) - distFillPlusNoiseDisp( position - vec3(NORM_EPS, 0, 0), scale));
+        change.y = (distFillPlusNoiseDisp( position + vec3(0, NORM_EPS, 0), scale) - distFillPlusNoiseDisp( position - vec3(0, NORM_EPS, 0), scale)); 
+        change.z = (distFillPlusNoiseDisp( position + vec3(0, 0, NORM_EPS), scale) - distFillPlusNoiseDisp( position - vec3(0, 0, NORM_EPS), scale)); 
+        return normalize( change );
+    }
+
+    // Camera Fragment Position (Orthographic)
+    vec3 orthoFragPos(vec2 fragCoord, vec3 cameraDir, vec3 cameraPos) {
+
+        // Ortho Pixel Pos Adj
+        vec3 initialUp = vec3(0.0, 1.0, 0.0);
+        if (cameraDir.x == 0.0 && cameraDir.z == 0.0 && cameraDir.y != 0.0) {
+            initialUp = vec3(0.0, 0.0, 1.0);
+        }
+        vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
+        vec2 offset = (uv * uCameraSize / uCameraZoom) - (uCameraSize / uCameraZoom * 0.5);
+        vec3 rightChange = normalize(cross(cameraDir, initialUp));
+        vec3 upChange = normalize(cross(rightChange, cameraDir));
+        vec3 worldOffset = offset.x * rightChange + offset.y * upChange;
+        return cameraPos + worldOffset;
+    }
+
+    // RGBA Unpacking
+    float unpackRGBAToDepth(vec4 color) {
+        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
+        return depth;
+    }
+
+    // MAIN
     void main() {
 
         // Determine Gyroid Geometry Scale
@@ -271,6 +294,7 @@ const frag = `
 
         // Background is Black
         vec3 col = vec3(0.0);
+        gl_FragColor = vec4(vec3(col), 0.0);
 
         // Ray March to Find Object Position (Fixed Step)
         float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepth, backDepth, scale);
@@ -279,7 +303,7 @@ const frag = `
         // If Object Solve Lighting
         if (objDist < MAX_DIST && objDist < backDepth) {
 
-            // Find Normal
+            // Find Normal and Add Noise Displacement
             vec3 normal;
             if (objDist == frontDepth) {
                 // Normal of Mesh Obj
@@ -287,12 +311,10 @@ const frag = `
             } else {
                 // Normal of Gyroid
                 normal = tpmsGradBeam(objPos, scale);
-            }
 
-            // Noise
-            vec3 longPos = vec3(objPos.x, objPos.y*2.0, objPos.z);
-            float noiseLarge = 1.0 - 0.3*simplex3d(objPos*0.1);
-            float noiseSmall = 1.0 - 0.2*simplex3d(longPos*0.25);
+                // Add Noise Displacement
+                objDist += noiseDisplacement(objPos); 
+            }
 
 
             // Adjust Light Position
@@ -303,7 +325,7 @@ const frag = `
             
             // Dist From Light
             float lightDist = length(lightPos-objPos);
-            float cheapAO = min(1.0, 10.0/(lightDist)); 
+            float cheapAO = min(1.0, 20.0/(lightDist)); 
 
             // Ambient Lighting
             vec3 ambiLight = vec3(1.) * ambiStrength;
@@ -321,14 +343,15 @@ const frag = `
             vec3 combLight = ambiLight + diffLight + specLight;
 
             // Mix It All Up!
-            col = combLight * uColor * noiseLarge * noiseSmall * cheapAO;
+            col = combLight * uColor * cheapAO;
             
+            // Output Fragment
+            gl_FragColor = vec4(vec3(col), 1.0);
         }
         
-        // Output Fragment
-        gl_FragColor = vec4(vec3(col), 1.0);
     }
 `
+// End Shader Section
 
 // JS Globals
 let scene, frontScene, backScene
@@ -346,7 +369,7 @@ const lightPosition = (phi, theta) => {
 }
 
 // Setup
-const Init = () => {
+const init = () => {
     
     // Consts
     const dpmm = 25 // dots per mm
@@ -371,7 +394,18 @@ const Init = () => {
     controls = new OrbitControls(camera, renderer.domElement)
     controls.mouseButtons.RIGHT = '' // disable pan
 
-    // Render Targets and Secondary Scenes
+    // Background Texture
+    scene.background = new THREE.Color( 0x000000 )
+	scene.fog = new THREE.Fog( 0x000000, 25, 75 )
+    const floorMaterial = new THREE.MeshBasicMaterial()
+    floorMaterial.color = new THREE.Color(0x333333)
+    const floorMesh = new THREE.Mesh( new THREE.PlaneGeometry( 500, 500 ), floorMaterial )
+    floorMesh.rotation.x = - Math.PI / 2
+    floorMesh.position.y = -15
+    scene.add(floorMesh)
+
+
+    // Render Targets and Secondary Scenes for Depths
     renderTargetFront = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
@@ -400,7 +434,10 @@ const Init = () => {
         box: new RoundedBoxGeometry(20, 20, 20, 10, 5),
         flatBox: new RoundedBoxGeometry(2, 20, 20, 10, 5),
         sphere: new THREE.SphereGeometry(10),
+        cone: new THREE.ConeGeometry(10, 20),
         torus: Torus(10, 4, 16, 100),
+        torusKnot: new THREE.TorusKnotGeometry(10, 5),
+        teapot: new TeapotGeometry(10),
     }
     let geometry = geometries[meshConfigs.geometry]
 
@@ -427,7 +464,9 @@ const Init = () => {
         'lightPhi': Math.PI/3,
         'color': [0.8,0.8,0.8],
         'geoType': 0,
-        'fillFactor': 0.25
+        'fillFactor': 0.25,
+        'toggleSurfaceNoise': true,
+        'surfaceNoiseSize': 1.0
     }
     const material = new THREE.ShaderMaterial({
         uniforms: {
@@ -445,10 +484,13 @@ const Init = () => {
             'uLightPhi': { 'value': shaderConfigs.lightPhi },
             'uLightCol': { 'value': meshConfigs.lightColor },
             'uGeoType': { 'value': shaderConfigs.geoType },
-            'uFillFactor': { 'value': shaderConfigs.fillFactor }
+            'uFillFactor': { 'value': shaderConfigs.fillFactor },
+            'uToggleDisplacement': { 'value': shaderConfigs.toggleSurfaceNoise },
+            'uAdjustDisp': { 'value': shaderConfigs.surfaceNoiseSize }
         },
         vertexShader: vert,
-        fragmentShader: frag
+        fragmentShader: frag,
+        transparent: true
     })
     console.log(material.uniforms)
     const mesh = new THREE.Mesh(geometry, material)
@@ -477,7 +519,7 @@ const Init = () => {
     controls.addEventListener('change', () => {
         material.uniforms.uCameraPos.value = camera.position
         material.uniforms.uCameraZoom.value = camera.zoom
-        animate()
+        updateRender()
     })
 
     // Window Resize Event Listener
@@ -494,7 +536,7 @@ const Init = () => {
                 window.innerHeight * window.devicePixelRatio
             );
             renderer.setSize(width, height)
-            render()
+            updateRender()
         },
         false
     )
@@ -503,14 +545,14 @@ const Init = () => {
     stats = Stats()
     document.body.appendChild(stats.dom)
 
-    // UI
+    // UI and Handlers
     const gui = new GUI()
     const sceneFolder = gui.addFolder('Scene Configs')
     sceneFolder.add(meshConfigs, 'geometry', Object.keys(geometries)).onChange( value => {
         mesh.geometry = geometries[value]
         depthMeshBack.geometry = geometries[value]
         depthMeshFront.geometry = geometries[value]
-        animate()
+        updateRender()
     })
     sceneFolder.add(meshConfigs, 'lightHue', 0.0, 1.0).onChange( value => {
         let color = new THREE.Color("hsl("+value*255+", 100%, 50%)")
@@ -519,58 +561,59 @@ const Init = () => {
         let rgb = color.toArray();
         console.log(rgb)
         material.uniforms.uLightCol.value = rgb
-        animate()
+        floorMaterial.color = new THREE.Color("hsl("+value*255+", 15%, 20%)")
+        updateRender()
     })
     sceneFolder.add(shaderConfigs, 'lightTheta', 0, Math.PI*2).onChange( value => {
         material.uniforms.uLightTheta.value = value
         lightPos = lightPosition(shaderConfigs.lightPhi, value)
         bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
-        animate()
+        updateRender()
     })
-    // sceneFolder.add(shaderConfigs, 'lightPhi', 0, Math.PI).onChange( value => {
-    //     material.uniforms.uLightPhi.value = value
-    //     lightPos = lightPosition(value, shaderConfigs.lightTheta)
-    //     bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
-    //     animate()
-    // })
     const shaderFolder = gui.addFolder('Shader Configs')
     shaderFolder.add(shaderConfigs, 'stepSize', 0.001, 0.1).onChange( value => { 
         material.uniforms.uStepSize.value = value 
-        animate()
+        updateRender()
     })
     shaderFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
         material.uniforms.uCellSize.value = value 
-        animate()
+        updateRender()
     })
     shaderFolder.add(shaderConfigs, 'fillFactor', 0.1, 1).onChange( value => { 
         material.uniforms.uFillFactor.value = value 
-        animate()
+        updateRender()
     })
     shaderFolder.add(shaderConfigs, 'geoType', {'gyroidBeam': 0, 'gyroidSurface': 1, 'schwarzP': 2, 'octet': 3}).onChange( value => { 
         material.uniforms.uGeoType.value = value 
-        animate()
+        updateRender()
+    })
+    shaderFolder.add(shaderConfigs, 'toggleSurfaceNoise').onChange( value => {
+        material.uniforms.uToggleDisplacement.value = value
+        updateRender()
+    })
+    shaderFolder.add(shaderConfigs, 'surfaceNoiseSize', 0.1, 3.0).onChange( value => {
+        material.uniforms.uAdjustDisp.value = value
+        updateRender()
     })
     shaderFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
         material.uniforms.uColor.value = value
-        animate()
+        updateRender()
     })
 
 
 }
 
-// Cycle Animation
-function animate() {
-    // requestAnimationFrame(animate)
-    // controls.update()
+// Render wrapper
+function updateRender() {
     render()
-    render()
+    render() // second render helps with stuttering due to multiple render pass, unsure why
     stats.update()
 }
 
 // Render one frame
 function render() {
     
-    // render targets
+    // render targets first for depths
     renderer.setRenderTarget(renderTargetFront)
     renderer.clear()
     renderer.render(frontScene, camera)
@@ -586,5 +629,5 @@ function render() {
 }
 
 // Start!
-Init()
-animate()
+init()
+updateRender()
