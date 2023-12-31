@@ -22,7 +22,42 @@ const vert = `
     }
 `
 
-const frag = `
+const fragDepth = `
+    // uniform sampler2D uDepthPeelTex;
+    uniform sampler2D uOutputRef;
+    // uniform bool uBackFace;
+
+    // RGBA Unpacking
+    float unpackRGBAToDepth(vec4 color) {
+        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);
+        float depth = dot(color, bitShifts);
+        return depth;
+    }
+
+    void main() {
+
+        // Find previous depth values
+        vec2 uv = gl_FragCoord.xy/vec2(textureSize(uOutputRef, 0));
+        float prevDepth = unpackRGBAToDepth(texture2D( uOutputRef, uv));
+        float currentDepth;
+
+        // Test if it is behind first depth value (Peel away first depth)
+        if (gl_FragCoord.z < prevDepth) {
+            discard;
+            return;
+        } else {
+            // New depth is the depth of the next fragment that passes
+            currentDepth = (1.0-gl_FragCoord.z);
+        }
+
+        // Output
+        gl_FragColor = vec4(currentDepth);
+
+    }
+`
+
+
+const fragMain = `
     #define MAX_STEPS 10000
     #define MAX_DIST 200.
     #define MIN_DIST 0.01
@@ -36,6 +71,12 @@ const frag = `
     varying vec3 vProjPos;
     uniform sampler2D uFrontTexture; // depth texture of front face
     uniform sampler2D uBackTexture; // depth texture of back face
+    uniform sampler2D uFrontTextureSecond; // depth texture of Second front face
+    uniform sampler2D uBackTextureSecond; // depth texture of Second back face
+    uniform sampler2D uFrontTextureThird; // depth texture of Third front face
+    uniform sampler2D uBackTextureThird; // depth texture of Third back face
+    uniform sampler2D uFrontTextureFourth; // depth texture of Fourth front face
+    uniform sampler2D uBackTextureFourth; // depth texture of Fourth back face
     uniform vec3 uCameraPos; // camera position (can I use the built-in instead?)
     uniform vec2 uCameraSize; // size of orthographic camera viewport
     uniform float uCameraNear; // how close it captures (used for depth unpacking)
@@ -51,6 +92,7 @@ const frag = `
     uniform float uFillFactor; // thickness of infill, not calibrated to any unit (roughly 0 is empty and 1 is full)
     uniform bool uToggleDisplacement; // bool of whether to use noise surface textures or not
     uniform float uAdjustDisp; // how big the surface textures should be
+    uniform int uDepthPeelVal; // how many steps of the depth peel should occur
 
     // Declare Parameters
     float ambiStrength = 0.4; // Ambient light strength
@@ -64,6 +106,12 @@ const frag = `
 
 
     // GEOMETRIES
+
+    // Mesh SDF
+    float distMesh(vec3 point, vec4 frontDepths, vec4 backDepths) {
+        // todo
+        return 0.0;
+    }
 
     // Gyroid SDF
     float distGyroidBeam(vec3 point, float scale) {
@@ -213,14 +261,39 @@ const frag = `
     // End of 3D Simplex Noise Segment
 
     // Fixed Step Ray Marcher
-    float fixedStepMarcher(vec3 position, vec3 direction, float near, float far, float scale) {
+    float fixedStepMarcher(vec3 position, vec3 direction, vec4 frontDepths, vec4 backDepths, float scale) {
+        float near = frontDepths.x;
+        float far = backDepths.x;
         float dist = near;
         position += near * direction;
+        int peel = 0;
         for (int iStep=0; iStep<MAX_STEPS; iStep++) {
             float distToGeo = distFill(position, scale);
             if (distToGeo > MIN_DIST && dist < MAX_DIST && dist < far) {
                 position += uStepSize * direction;
                 dist += uStepSize;
+            } else if (dist >= far) {
+                if (peel < 1) {
+                    float bigStep = (frontDepths.y - far);
+                    position += bigStep * direction;
+                    dist += bigStep;
+                    far = backDepths.y;
+                    peel = 1;
+                } else if (peel < 2) {
+                    float bigStep = (frontDepths.z - far);
+                    position += bigStep * direction;
+                    dist += bigStep;
+                    far = backDepths.z;
+                    peel = 2;
+                } else  if (peel < 3) {
+                    float bigStep = (frontDepths.w - far);
+                    position += bigStep * direction;
+                    dist += bigStep;
+                    far = backDepths.w;
+                    peel = 3;
+                } else{
+                    return MAX_DIST;
+                }
             } else {
                 return dist;
             }
@@ -269,7 +342,8 @@ const frag = `
 
     // RGBA Unpacking
     float unpackRGBAToDepth(vec4 color) {
-        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);        float depth = dot(color, bitShifts);
+        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);
+        float depth = dot(color, bitShifts);
         return depth;
     }
 
@@ -279,15 +353,45 @@ const frag = `
         // Determine Gyroid Geometry Scale
         float scale = 2.0*PI/uCellSize; // Geo scale
 
-        // Find Front and Back Depth from Textures
+        // Find Front and Back Depth from Textures (First Peel)
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
 
-        float frontDepth = unpackRGBAToDepth(texture2D( uFrontTexture, uv));
-        frontDepth = uCameraNear + (frontDepth)*uCameraFar;
+        float frontDepth = 1.0 - unpackRGBAToDepth(texture2D( uFrontTexture, uv));
+        float backDepth = 1.0 - unpackRGBAToDepth(texture2D( uBackTexture, uv));
 
-        float backDepth = unpackRGBAToDepth(texture2D( uBackTexture, uv));
-        backDepth = uCameraNear + (backDepth)*uCameraFar;
-        
+        // Find Subsequent Depth Peels and Pack into Vec4
+        vec4 frontDepths = vec4(
+            frontDepth, 
+            texture2D( uFrontTextureSecond, uv).r,
+            texture2D( uFrontTextureThird, uv).r,
+            texture2D( uFrontTextureFourth, uv).r
+        );
+        frontDepths = uCameraNear + (1.0 - frontDepths) * uCameraFar;
+
+        vec4 backDepths = vec4(
+            backDepth, 
+            texture2D( uBackTextureSecond, uv).r,
+            texture2D( uBackTextureThird, uv).r,
+            texture2D( uBackTextureFourth, uv).r
+        );
+        backDepths = uCameraNear + (1.0 - backDepths) * uCameraFar;
+
+        // Restrict Depth Peel Steps (Debug and Educational Only)
+        switch (uDepthPeelVal) {
+            case 1:
+                frontDepths = vec4(frontDepths.x, vec3(uCameraFar));
+                backDepths = vec4(backDepths.x, vec3(uCameraFar));
+                break;
+            case 2:
+                frontDepths = vec4(frontDepths.xy, vec2(uCameraFar));
+                backDepths = vec4(backDepths.xy, vec2(uCameraFar));
+                break;
+            case 3:
+                frontDepths = vec4(frontDepths.xyz, uCameraFar);
+                backDepths = vec4(backDepths.xyz, uCameraFar);
+                break;
+        }
+
         // Find Camera Angle
         vec3 cameraDir = normalize(-uCameraPos);
         vec3 fragPos = orthoFragPos(gl_FragCoord.xy, cameraDir, uCameraPos);
@@ -297,15 +401,15 @@ const frag = `
         gl_FragColor = vec4(vec3(col), 0.0);
 
         // Ray March to Find Object Position (Fixed Step)
-        float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepth, backDepth, scale);
+        float objDist = fixedStepMarcher(fragPos.xyz, cameraDir, frontDepths, backDepths, scale);
         vec3 objPos = fragPos + cameraDir * objDist;
 
         // If Object Solve Lighting
-        if (objDist < MAX_DIST && objDist < backDepth) {
+        if (objDist < MAX_DIST) {
 
             // Find Normal and Add Noise Displacement
             vec3 normal;
-            if (objDist == frontDepth) {
+            if (objDist == frontDepths.x) {
                 // Normal of Mesh Obj
                 normal = vNormal;
             } else {
@@ -355,7 +459,10 @@ const frag = `
 
 // JS Globals
 let scene, frontScene, backScene
-let renderTargetBack, renderTargetFront
+let depthMeshFront, depthMeshBack
+let depthMatFront, depthMatBack, depthPeelMat
+let renderTargetsBack = [] 
+let renderTargetsFront = []
 let renderer, camera, controls, stats
 
 // Calc Light Position
@@ -406,20 +513,27 @@ const init = () => {
 
 
     // Render Targets and Secondary Scenes for Depths
-    renderTargetFront = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-    })
-    renderTargetBack = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-    })
+    for (let i=0; i<4; i++) {
+        renderTargetsFront.push(
+            new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+                minFilter: THREE.LinearFilter,
+                magFilter: THREE.LinearFilter,
+            })
+        )
+        renderTargetsBack.push(
+            new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+                minFilter: THREE.LinearFilter,
+                magFilter: THREE.LinearFilter,
+            })
+        )
+    }
+    
     frontScene = new THREE.Scene()
     backScene = new THREE.Scene()
 
     // Model
     let meshConfigs = {
-        'geometry': 'box',
+        'geometry': 'torusKnot',
         'lightColor': [1.0, 1.0, 1.0],
         'lightHue': 1.0
     }
@@ -443,18 +557,27 @@ const init = () => {
 
     // Depth Renders
     // Front depth will track where the fragment hits the mesh (first time only)
-    const depthMatFront = new THREE.MeshDepthMaterial()
+    depthMatFront = new THREE.MeshDepthMaterial()
     depthMatFront.side = THREE.FrontSide
-    depthMatFront.depthPacking = THREE.RGBADepthPacking // better, but needs to be unpacked in shader
-    const depthMeshFront = new THREE.Mesh(geometry, depthMatFront)
+    depthMatFront.depthPacking = THREE.RGBADepthPacking 
+    depthMeshFront = new THREE.Mesh(geometry, depthMatFront)
     frontScene.add(depthMeshFront)
 
     // Back depth will track where the fragment exits the mesh (first time only)
-    const depthMatBack = new THREE.MeshDepthMaterial()
+    depthMatBack = new THREE.MeshDepthMaterial()
     depthMatBack.side = THREE.BackSide
     depthMatBack.depthPacking = THREE.RGBADepthPacking
-    const depthMeshBack = new THREE.Mesh(geometry, depthMatBack)
+    depthMeshBack = new THREE.Mesh(geometry, depthMatBack)
     backScene.add(depthMeshBack)
+
+    // Subsequent depth peel material (2nd through 4th peel)
+    depthPeelMat = new THREE.ShaderMaterial({
+        uniforms: {
+            'uOutputRef': {'value': renderTargetsBack[0].texture },
+        },
+        vertexShader: vert,
+        fragmentShader: fragDepth
+    })
 
     // Shader Material & Mesh
     const shaderConfigs = {
@@ -466,12 +589,19 @@ const init = () => {
         'geoType': 0,
         'fillFactor': 0.25,
         'toggleSurfaceNoise': true,
-        'surfaceNoiseSize': 1.0
+        'surfaceNoiseSize': 1.0,
+        'depthPeelSteps': 4
     }
     const material = new THREE.ShaderMaterial({
         uniforms: {
-            'uFrontTexture': { 'value': renderTargetFront.texture },
-            'uBackTexture': { 'value': renderTargetBack.texture },
+            'uFrontTexture': { 'value': renderTargetsFront[0].texture },
+            'uBackTexture': { 'value': renderTargetsBack[0].texture },
+            'uFrontTextureSecond': { 'value': renderTargetsFront[1].texture },
+            'uBackTextureSecond': { 'value': renderTargetsBack[1].texture },
+            'uFrontTextureThird': { 'value': renderTargetsFront[2].texture },
+            'uBackTextureThird': { 'value': renderTargetsBack[2].texture },
+            'uFrontTextureFourth': { 'value': renderTargetsFront[3].texture },
+            'uBackTextureFourth': { 'value': renderTargetsBack[3].texture },
             'uCameraPos': { 'value': camera.position },
             'uCameraSize': { 'value': new THREE.Vector2(width/dpmm, height/dpmm)},
             'uCameraNear': { 'value': cameraNear },
@@ -486,10 +616,11 @@ const init = () => {
             'uGeoType': { 'value': shaderConfigs.geoType },
             'uFillFactor': { 'value': shaderConfigs.fillFactor },
             'uToggleDisplacement': { 'value': shaderConfigs.toggleSurfaceNoise },
-            'uAdjustDisp': { 'value': shaderConfigs.surfaceNoiseSize }
+            'uAdjustDisp': { 'value': shaderConfigs.surfaceNoiseSize },
+            'uDepthPeelVal': { 'value': shaderConfigs.depthPeelSteps }
         },
         vertexShader: vert,
-        fragmentShader: frag,
+        fragmentShader: fragMain,
         transparent: true
     })
     console.log(material.uniforms)
@@ -595,10 +726,15 @@ const init = () => {
         material.uniforms.uAdjustDisp.value = value
         updateRender()
     })
+    shaderFolder.add(shaderConfigs, 'depthPeelSteps', 1, 4, 1).onChange( value => {
+        material.uniforms.uDepthPeelVal.value = value
+        updateRender()
+    })
     shaderFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
         material.uniforms.uColor.value = value
         updateRender()
     })
+    
 
 
 }
@@ -613,16 +749,44 @@ function updateRender() {
 // Render one frame
 function render() {
     
-    // render targets first for depths
-    renderer.setRenderTarget(renderTargetFront)
+    // Render FRONT face depth peel target
+    depthMeshFront.material = depthMatFront
+    renderer.setRenderTarget(renderTargetsFront[0])
     renderer.clear()
     renderer.render(frontScene, camera)
 
-    renderer.setRenderTarget(renderTargetBack)
+    // Render BACK face depth peel target
+    depthMeshBack.material = depthMatBack
+    renderer.setRenderTarget(renderTargetsBack[0])
     renderer.clear()
     renderer.render(backScene, camera)
 
+
+    // For subsequent depth peels, alternate front and back
+    depthMeshFront.material = depthPeelMat
+    depthMeshBack.material = depthPeelMat
+    let gl = renderer.getContext() // get webGL context
+    gl.enable(gl.CULL_FACE);
+
+    for (let iPass=1; iPass<4; iPass++) {
+        
+        // Front pass
+        depthPeelMat.uniforms.uOutputRef.value = renderTargetsBack[iPass-1].texture
+        gl.cullFace(gl.BACK);
+        renderer.setRenderTarget(renderTargetsFront[iPass])
+        renderer.clear()
+        renderer.render(frontScene, camera)
+        
+        // Back pass
+        depthPeelMat.uniforms.uOutputRef.value = renderTargetsFront[iPass].texture
+        gl.cullFace(gl.FRONT);
+        renderer.setRenderTarget(renderTargetsBack[iPass])
+        renderer.clear()
+        renderer.render(backScene, camera)
+    }
+
     // render scene
+    gl.cullFace(gl.BACK);
     renderer.setRenderTarget(null)
     renderer.clear()
     renderer.render(scene, camera)
