@@ -13,6 +13,7 @@ const vert = `
     varying vec3 vProjPos;
 
     void main() {
+        // Standard vertex shader stuff, with some extra varyings
         vNormal = normal;
         vUv = uv;
         vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
@@ -23,17 +24,24 @@ const vert = `
 `
 
 const fragDepth = `
-    // uniform sampler2D uDepthPeelTex;
     uniform sampler2D uOutputRef;
-    // uniform bool uBackFace;
 
     // RGBA Unpacking
-    float unpackRGBAToDepth(vec4 color) {
-        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);
-        float depth = dot(color, bitShifts);
-        return depth;
+    float unpackRGBAToDepth( in vec4 pack ) {
+        // https://stackoverflow.com/questions/48288154/pack-depth-information-in-a-rgba-texture-using-mediump-precison
+        float depth = dot( pack, 1.0 / vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0) );
+        return depth * (256.0*256.0*256.0) / (256.0*256.0*256.0 - 1.0);
     }
 
+    // RGBA Packing
+    vec4 packDepthToRGBA( in float depth ) {
+        // https://stackoverflow.com/questions/48288154/pack-depth-information-in-a-rgba-texture-using-mediump-precison
+        depth *= (256.0*256.0*256.0 - 1.0) / (256.0*256.0*256.0);
+        vec4 encode = fract( depth * vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0) );
+        return vec4( encode.xyz - encode.yzw / 256.0, encode.w ) + 1.0/512.0;
+    }
+
+    // Custom depth shader with a depth peel mask to know where to start the depth test per fragment
     void main() {
 
         // Find previous depth values
@@ -47,15 +55,14 @@ const fragDepth = `
             return;
         } else {
             // New depth is the depth of the next fragment that passes
-            currentDepth = (1.0-gl_FragCoord.z);
+            currentDepth = gl_FragCoord.z;
         }
 
         // Output
-        gl_FragColor = vec4(currentDepth);
+        gl_FragColor = packDepthToRGBA(currentDepth);
 
     }
 `
-
 
 const fragMain = `
     #define MAX_STEPS 10000
@@ -87,18 +94,24 @@ const fragMain = `
     uniform vec3 uColor; // color of geometry
     uniform float uLightTheta; // theta angle of spherical light position
     uniform float uLightPhi; // phi angle of spherical light position
+    uniform float uLightRadius; // distance of light from center
     uniform vec3 uLightCol; // color of light
     uniform int uGeoType; // type of geo infill (e.g. gyroid, octet, etc)
     uniform float uFillFactor; // thickness of infill, not calibrated to any unit (roughly 0 is empty and 1 is full)
     uniform bool uToggleDisplacement; // bool of whether to use noise surface textures or not
     uniform float uAdjustDisp; // how big the surface textures should be
     uniform int uDepthPeelVal; // how many steps of the depth peel should occur
+    uniform float uAmbiStrength;
+    uniform float uDiffStrength;
+    uniform float uSpecStrength;
+    uniform float uSpecPow;
+    uniform float uAOAmplitude;
 
     // Declare Parameters
-    float ambiStrength = 0.4; // Ambient light strength
-    float diffStength = 0.4; // Diffuse light strength
-    float specStrength = 0.2; // Specular light strength
-    float specPow = 4.0; // Specular light power (spread)
+    // float uAmbiStrength = 0.4; // Ambient light strength
+    // float uDiffStrength = 0.4; // Diffuse light strength
+    // float uSpecStrength = 0.2; // Specular light strength
+    // float uSpecPow = 4.0; // Specular light power (spread)
     float noiseSize = 8.0; // How big the noise should be scaled
     float noisePower = 0.01; // How much displacement in mm a value 1 noise reading should be
     float noiseSize2 = 2.0; // How big the noise should be scaled
@@ -109,7 +122,7 @@ const fragMain = `
 
     // Mesh SDF
     float distMesh(vec3 point, vec4 frontDepths, vec4 backDepths) {
-        // todo
+        // todo, make an sdf for the mesh instead of a custom marcher
         return 0.0;
     }
 
@@ -149,18 +162,14 @@ const fragMain = `
         vec3 positionShiftXY = position + vec3(spacing/2.0, spacing/2.0, 0.0);
         
         pMod3( position, vec3(spacing));
-        position.x = abs(position.x);
-        position.y = abs(position.y);
-        position.z = abs(position.z);
+        position = abs(position);
         if (position.y > position.x) { position.xy = position.yx; } 
         if (position.z > position.y) { position.yz = position.zy; } 
         
         float beamPlanar = distBeam(position, normalize(vec3(1.0,1.0,0.0)), beamRadius); 
         
         pMod3( positionShiftXZ, vec3(spacing));
-        positionShiftXZ.x = abs(positionShiftXZ.x);
-        positionShiftXZ.y = abs(positionShiftXZ.y);
-        positionShiftXZ.z = abs(positionShiftXZ.z);
+        positionShiftXZ = abs(positionShiftXZ);
         if (positionShiftXZ.y > positionShiftXZ.x) { positionShiftXZ.xy = positionShiftXZ.yx; } 
         if (positionShiftXZ.z > positionShiftXZ.y) { positionShiftXZ.yz = positionShiftXZ.zy; } 
 
@@ -198,6 +207,7 @@ const fragMain = `
 
     /* discontinuous pseudorandom uniformly distributed in [-0.5, +0.5]^3 */
     vec3 random3(vec3 c) {
+        // https://www.shadertoy.com/view/XsX3zB
         float j = 4096.0*sin(dot(c,vec3(17.0, 59.4, 15.0)));
         vec3 r;
         r.z = fract(512.0*j);
@@ -214,6 +224,7 @@ const fragMain = `
 
     /* 3d simplex noise */
     float simplex3d(vec3 p) {
+        // https://www.shadertoy.com/view/XsX3zB
         /* 1. find current tetrahedron T and it's four vertices */
         /* s, s+i1, s+i2, s+1.0 - absolute skewed (integer) coordinates of T vertices */
         /* x, x1, x2, x3 - unskewed coordinates of p relative to each of T vertices*/
@@ -273,24 +284,13 @@ const fragMain = `
                 position += uStepSize * direction;
                 dist += uStepSize;
             } else if (dist >= far) {
-                if (peel < 1) {
-                    float bigStep = (frontDepths.y - far);
+                if (peel < (uDepthPeelVal - 1)) {
+                    // start next depth peel at the second front face deep
+                    peel++;
+                    float bigStep = (frontDepths[peel] - far);
                     position += bigStep * direction;
                     dist += bigStep;
-                    far = backDepths.y;
-                    peel = 1;
-                } else if (peel < 2) {
-                    float bigStep = (frontDepths.z - far);
-                    position += bigStep * direction;
-                    dist += bigStep;
-                    far = backDepths.z;
-                    peel = 2;
-                } else  if (peel < 3) {
-                    float bigStep = (frontDepths.w - far);
-                    position += bigStep * direction;
-                    dist += bigStep;
-                    far = backDepths.w;
-                    peel = 3;
+                    far = backDepths[peel];
                 } else{
                     return MAX_DIST;
                 }
@@ -315,7 +315,7 @@ const fragMain = `
         return distFill(position, scale) + noiseDisplacement(position);
     }
 
-    // Gyroid Beam Gradient (For Normal)
+    // Gyroid Beam Gradient (For Normal, faster than sampling the marcher for normals)
     vec3 tpmsGradBeam(vec3 position, float scale) {
         vec3 change;
         change.x = (distFillPlusNoiseDisp( position + vec3(NORM_EPS, 0, 0), scale) - distFillPlusNoiseDisp( position - vec3(NORM_EPS, 0, 0), scale));
@@ -341,10 +341,10 @@ const fragMain = `
     }
 
     // RGBA Unpacking
-    float unpackRGBAToDepth(vec4 color) {
-        const vec4 bitShifts = vec4(1.0 / (256.0 * 256.0 * 256.0), 1.0 / (256.0 * 256.0), 1.0 / 256.0, 1.0);
-        float depth = dot(color, bitShifts);
-        return depth;
+    float unpackRGBAToDepth( in vec4 pack ) {
+        // https://stackoverflow.com/questions/48288154/pack-depth-information-in-a-rgba-texture-using-mediump-precison
+        float depth = dot( pack, 1.0 / vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0) );
+        return depth * (256.0*256.0*256.0) / (256.0*256.0*256.0 - 1.0);
     }
 
     // MAIN
@@ -356,40 +356,27 @@ const fragMain = `
         // Find Front and Back Depth from Textures (First Peel)
         vec2 uv = gl_FragCoord.xy/vec2(textureSize(uFrontTexture, 0));
 
-        float frontDepth = 1.0 - unpackRGBAToDepth(texture2D( uFrontTexture, uv));
-        float backDepth = 1.0 - unpackRGBAToDepth(texture2D( uBackTexture, uv));
-
-        // Find Subsequent Depth Peels and Pack into Vec4
+        // Depth Peels and Pack into Vec4
         vec4 frontDepths = vec4(
-            frontDepth, 
-            texture2D( uFrontTextureSecond, uv).r,
-            texture2D( uFrontTextureThird, uv).r,
-            texture2D( uFrontTextureFourth, uv).r
+            unpackRGBAToDepth(texture2D( uFrontTexture, uv)), 
+            unpackRGBAToDepth(texture2D( uFrontTextureSecond, uv)),
+            unpackRGBAToDepth(texture2D( uFrontTextureThird, uv)),
+            unpackRGBAToDepth(texture2D( uFrontTextureFourth, uv))
         );
-        frontDepths = uCameraNear + (1.0 - frontDepths) * uCameraFar;
+        frontDepths = uCameraNear + (frontDepths) * uCameraFar;
 
         vec4 backDepths = vec4(
-            backDepth, 
-            texture2D( uBackTextureSecond, uv).r,
-            texture2D( uBackTextureThird, uv).r,
-            texture2D( uBackTextureFourth, uv).r
+            unpackRGBAToDepth(texture2D( uBackTexture, uv)), 
+            unpackRGBAToDepth(texture2D( uBackTextureSecond, uv)),
+            unpackRGBAToDepth(texture2D( uBackTextureThird, uv)),
+            unpackRGBAToDepth(texture2D( uBackTextureFourth, uv))
         );
-        backDepths = uCameraNear + (1.0 - backDepths) * uCameraFar;
+        backDepths = uCameraNear + (backDepths) * uCameraFar;
 
-        // Restrict Depth Peel Steps (Debug and Educational Only)
-        switch (uDepthPeelVal) {
-            case 1:
-                frontDepths = vec4(frontDepths.x, vec3(uCameraFar));
-                backDepths = vec4(backDepths.x, vec3(uCameraFar));
-                break;
-            case 2:
-                frontDepths = vec4(frontDepths.xy, vec2(uCameraFar));
-                backDepths = vec4(backDepths.xy, vec2(uCameraFar));
-                break;
-            case 3:
-                frontDepths = vec4(frontDepths.xyz, uCameraFar);
-                backDepths = vec4(backDepths.xyz, uCameraFar);
-                break;
+        // Restrict Depth Peel Steps (Debug Only)
+        for (int i=3; i>(uDepthPeelVal-1); i--) {
+            frontDepths[i] = uCameraFar;
+            backDepths[i] = uCameraFar;
         }
 
         // Find Camera Angle
@@ -422,26 +409,26 @@ const fragMain = `
 
 
             // Adjust Light Position
-            float lRadius = 15.0;
+            float lRadius = uLightRadius;
             float lPhi = uLightPhi;
             float lTheta = uLightTheta;
             vec3 lightPos = vec3(lRadius*sin(lPhi)*cos(lTheta), lRadius*cos(lPhi), lRadius*sin(lPhi)*sin(lTheta));
             
             // Dist From Light
             float lightDist = length(lightPos-objPos);
-            float cheapAO = min(1.0, 20.0/(lightDist)); 
+            float cheapAO = min(1.0, uAOAmplitude/(lightDist)); 
 
             // Ambient Lighting
-            vec3 ambiLight = vec3(1.) * ambiStrength;
+            vec3 ambiLight = vec3(1.) * uAmbiStrength;
             
             // Diffuse Lighting
             vec3 diffDir = normalize(lightPos - objPos);
-            vec3 diffLight = uLightCol * diffStength * max(dot(normal, diffDir), 0.0);
+            vec3 diffLight = uLightCol * uDiffStrength * max(dot(normal, diffDir), 0.0);
             
             // Specular Lighting
             vec3 reflDir = reflect(-diffDir, normal);
-            float specFact = pow(max(dot(-cameraDir, reflDir), 0.0), specPow);
-            vec3 specLight = uLightCol * specStrength * specFact;
+            float specFact = pow(max(dot(-cameraDir, reflDir), 0.0), uSpecPow);
+            vec3 specLight = uLightCol * uSpecStrength * specFact;
             
             // Phong Combined Lighting
             vec3 combLight = ambiLight + diffLight + specLight;
@@ -466,8 +453,7 @@ let renderTargetsFront = []
 let renderer, camera, controls, stats
 
 // Calc Light Position
-const lightPosition = (phi, theta) => {
-    let radius = 15.0;
+const lightPosition = (phi, theta, radius) => {
     return [
         radius*Math.sin(phi)*Math.cos(theta), 
         radius*Math.cos(phi),
@@ -500,15 +486,17 @@ const init = () => {
 
     controls = new OrbitControls(camera, renderer.domElement)
     controls.mouseButtons.RIGHT = '' // disable pan
+    controls.minZoom = 0.6
+    controls.maxPolarAngle = Math.PI*(7/16)
 
     // Background Texture
     scene.background = new THREE.Color( 0x000000 )
 	scene.fog = new THREE.Fog( 0x000000, 25, 75 )
     const floorMaterial = new THREE.MeshBasicMaterial()
     floorMaterial.color = new THREE.Color(0x333333)
-    const floorMesh = new THREE.Mesh( new THREE.PlaneGeometry( 500, 500 ), floorMaterial )
+    const floorMesh = new THREE.Mesh( new THREE.PlaneGeometry( 500000, 500000 ), floorMaterial )
     floorMesh.rotation.x = - Math.PI / 2
-    floorMesh.position.y = -15
+    floorMesh.position.y = -20
     scene.add(floorMesh)
 
 
@@ -533,9 +521,10 @@ const init = () => {
 
     // Model
     let meshConfigs = {
-        'geometry': 'torusKnot',
+        'geometry': 'box',
         'lightColor': [1.0, 1.0, 1.0],
-        'lightHue': 1.0
+        'lightHue': 1.0,
+        'Animate!': animate // trigger function for GUI
     }
 
     const Torus = (radius, tube, radSegs, tubeSegs) => {
@@ -585,12 +574,18 @@ const init = () => {
         'cellSize': 4,
         'lightTheta': Math.PI/4,
         'lightPhi': Math.PI/3,
+        'lightRadius': 15,
         'color': [0.8,0.8,0.8],
         'geoType': 0,
         'fillFactor': 0.25,
         'toggleSurfaceNoise': true,
         'surfaceNoiseSize': 1.0,
-        'depthPeelSteps': 4
+        'depthPeelSteps': 4,
+        'ambientStrength': 0.4,
+        'diffuseStrength': 0.4,
+        'specularStrength': 0.4,
+        'specularPower': 2.0,
+        'AOAmplitude': 15
     }
     const material = new THREE.ShaderMaterial({
         uniforms: {
@@ -612,12 +607,18 @@ const init = () => {
             'uColor': { 'value': shaderConfigs.color },
             'uLightTheta': { 'value': shaderConfigs.lightTheta },
             'uLightPhi': { 'value': shaderConfigs.lightPhi },
+            'uLightRadius': { 'value': shaderConfigs.lightRadius },
             'uLightCol': { 'value': meshConfigs.lightColor },
             'uGeoType': { 'value': shaderConfigs.geoType },
             'uFillFactor': { 'value': shaderConfigs.fillFactor },
             'uToggleDisplacement': { 'value': shaderConfigs.toggleSurfaceNoise },
             'uAdjustDisp': { 'value': shaderConfigs.surfaceNoiseSize },
-            'uDepthPeelVal': { 'value': shaderConfigs.depthPeelSteps }
+            'uDepthPeelVal': { 'value': shaderConfigs.depthPeelSteps },
+            'uAmbiStrength': { 'value': shaderConfigs.ambientStrength },
+            'uDiffStrength': { 'value': shaderConfigs.diffuseStrength },
+            'uSpecStrength': { 'value': shaderConfigs.specularStrength },
+            'uSpecPow': { 'value': shaderConfigs.specularPower },
+            'uAOAmplitude': { 'value': shaderConfigs.AOAmplitude }
         },
         vertexShader: vert,
         fragmentShader: fragMain,
@@ -643,7 +644,7 @@ const init = () => {
     scene.add( bulbLight );
 
     // Adjust Light Position
-    let lightPos = lightPosition(shaderConfigs.lightTheta)
+    let lightPos = lightPosition(shaderConfigs.lightPhi, shaderConfigs.lightTheta, shaderConfigs.lightRadius)
     bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
 
     // Controls Change Event Listener
@@ -679,6 +680,7 @@ const init = () => {
     // UI and Handlers
     const gui = new GUI()
     const sceneFolder = gui.addFolder('Scene Configs')
+    sceneFolder.add(meshConfigs, 'Animate!')
     sceneFolder.add(meshConfigs, 'geometry', Object.keys(geometries)).onChange( value => {
         mesh.geometry = geometries[value]
         depthMeshBack.geometry = geometries[value]
@@ -697,7 +699,13 @@ const init = () => {
     })
     sceneFolder.add(shaderConfigs, 'lightTheta', 0, Math.PI*2).onChange( value => {
         material.uniforms.uLightTheta.value = value
-        lightPos = lightPosition(shaderConfigs.lightPhi, value)
+        lightPos = lightPosition(shaderConfigs.lightPhi, value, shaderConfigs.lightRadius),
+        bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
+        updateRender()
+    })
+    sceneFolder.add(shaderConfigs, 'lightRadius', 0, 50, 1).onChange( value => {
+        material.uniforms.uLightRadius.value = value
+        lightPos = lightPosition(shaderConfigs.lightPhi, shaderConfigs.lightTheta, value)
         bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
         updateRender()
     })
@@ -706,36 +714,58 @@ const init = () => {
         material.uniforms.uStepSize.value = value 
         updateRender()
     })
-    shaderFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
-        material.uniforms.uCellSize.value = value 
-        updateRender()
-    })
-    shaderFolder.add(shaderConfigs, 'fillFactor', 0.1, 1).onChange( value => { 
-        material.uniforms.uFillFactor.value = value 
-        updateRender()
-    })
-    shaderFolder.add(shaderConfigs, 'geoType', {'gyroidBeam': 0, 'gyroidSurface': 1, 'schwarzP': 2, 'octet': 3}).onChange( value => { 
-        material.uniforms.uGeoType.value = value 
-        updateRender()
-    })
-    shaderFolder.add(shaderConfigs, 'toggleSurfaceNoise').onChange( value => {
-        material.uniforms.uToggleDisplacement.value = value
-        updateRender()
-    })
-    shaderFolder.add(shaderConfigs, 'surfaceNoiseSize', 0.1, 3.0).onChange( value => {
-        material.uniforms.uAdjustDisp.value = value
-        updateRender()
-    })
     shaderFolder.add(shaderConfigs, 'depthPeelSteps', 1, 4, 1).onChange( value => {
         material.uniforms.uDepthPeelVal.value = value
         updateRender()
     })
-    shaderFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
-        material.uniforms.uColor.value = value
+    
+    const geoFolder = gui.addFolder('Geo Configs')
+    geoFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
+        material.uniforms.uCellSize.value = value 
+        updateRender()
+    })
+    geoFolder.add(shaderConfigs, 'fillFactor', 0.1, 1).onChange( value => { 
+        material.uniforms.uFillFactor.value = value 
+        updateRender()
+    })
+    geoFolder.add(shaderConfigs, 'geoType', {'gyroidBeam': 0, 'gyroidSurface': 1, 'schwarzP': 2, 'octet': 3}).onChange( value => { 
+        material.uniforms.uGeoType.value = value 
+        updateRender()
+    })
+    geoFolder.add(shaderConfigs, 'toggleSurfaceNoise').onChange( value => {
+        material.uniforms.uToggleDisplacement.value = value
+        updateRender()
+    })
+    geoFolder.add(shaderConfigs, 'surfaceNoiseSize', 0.1, 3.0).onChange( value => {
+        material.uniforms.uAdjustDisp.value = value
         updateRender()
     })
     
-
+    const matFolder = gui.addFolder('Material Configs')
+    matFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
+        material.uniforms.uColor.value = value
+        updateRender()
+    })
+    matFolder.add(shaderConfigs, 'ambientStrength', 0.0, 1.0, 0.1).onChange( value => {
+        material.uniforms.uAmbiStrength.value = value
+        updateRender()
+    })
+    matFolder.add(shaderConfigs, 'diffuseStrength', 0.0, 1.0, 0.1).onChange( value => {
+        material.uniforms.uDiffStrength.value = value
+        updateRender()
+    })
+    matFolder.add(shaderConfigs, 'specularStrength', 0.0, 1.0, 0.1).onChange( value => {
+        material.uniforms.uSpecStrength.value = value
+        updateRender()
+    })
+    matFolder.add(shaderConfigs, 'specularPower', 0.0, 10.0, 0.5).onChange( value => {
+        material.uniforms.uSpecPow.value = value
+        updateRender()
+    })
+    matFolder.add(shaderConfigs, 'AOAmplitude', 0, 50, 1).onChange( value => {
+        material.uniforms.uAOAmplitude.value = value
+        updateRender()
+    })
 
 }
 
@@ -791,6 +821,13 @@ function render() {
     renderer.clear()
     renderer.render(scene, camera)
 }
+
+// animation
+const animate = () => {
+    requestAnimationFrame(animate)
+    updateRender()
+}
+
 
 // Start!
 init()
