@@ -7,6 +7,8 @@ This is a cheap way of combining them, by sampling the front (entrance) depth an
 
 Here I use an example of TPMS structures (gyroids, schwarz-p) and beam structures (octet) to show how this can create good looking infills for fairly cheap. The marcher is fixed-step to allow for future plans of volumetric properties, but this approach works fine with a standard raymarcher as well.
 
+To address the problem of entering and exiting meshes multiple times, I use a basic depth peeling algorithm, establishing entrance and exit depths for each pixel fragment up to four layers deep. This information is held in eight textures that must be rendered to as renderTargets before the main render step happens. More info on depth peeling: https://developer.download.nvidia.com/assets/gamedev/docs/OrderIndependentTransparency.pdf
+
 ### To Run
 
 ```
