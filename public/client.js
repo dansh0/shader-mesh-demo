@@ -451,6 +451,8 @@ let depthMatFront, depthMatBack, depthPeelMat
 let renderTargetsBack = [] 
 let renderTargetsFront = []
 let renderer, camera, controls, stats
+let shaderConfigs, shaderMaterial, meshConfigs
+let bulbLight, bulbMat, floorMaterial
 
 // Calc Light Position
 const lightPosition = (phi, theta, radius) => {
@@ -459,6 +461,15 @@ const lightPosition = (phi, theta, radius) => {
         radius*Math.cos(phi),
         radius*Math.sin(phi)*Math.sin(theta)
     ]
+}
+
+// Light Color Updates
+const updateLightColor = (hueVal) => {
+    let color = new THREE.Color("hsl("+hueVal*255+", 100%, 50%)")
+    bulbMat.emissive = color
+    let rgb = color.toArray();
+    shaderMaterial.uniforms.uLightCol.value = rgb
+    floorMaterial.color = new THREE.Color("hsl("+hueVal*255+", 15%, 20%)")
 }
 
 // Setup
@@ -492,7 +503,7 @@ const init = () => {
     // Background Texture
     scene.background = new THREE.Color( 0x000000 )
 	scene.fog = new THREE.Fog( 0x000000, 25, 75 )
-    const floorMaterial = new THREE.MeshBasicMaterial()
+    floorMaterial = new THREE.MeshBasicMaterial()
     floorMaterial.color = new THREE.Color(0x333333)
     const floorMesh = new THREE.Mesh( new THREE.PlaneGeometry( 500000, 500000 ), floorMaterial )
     floorMesh.rotation.x = - Math.PI / 2
@@ -520,7 +531,7 @@ const init = () => {
     backScene = new THREE.Scene()
 
     // Model
-    let meshConfigs = {
+    meshConfigs = {
         'geometry': 'box',
         'lightColor': [1.0, 1.0, 1.0],
         'lightHue': 1.0,
@@ -569,7 +580,7 @@ const init = () => {
     })
 
     // Shader Material & Mesh
-    const shaderConfigs = {
+    shaderConfigs = {
         'stepSize': 0.02,
         'cellSize': 4,
         'lightTheta': Math.PI/4,
@@ -587,7 +598,7 @@ const init = () => {
         'specularPower': 2.0,
         'AOAmplitude': 15
     }
-    const material = new THREE.ShaderMaterial({
+    shaderMaterial = new THREE.ShaderMaterial({
         uniforms: {
             'uFrontTexture': { 'value': renderTargetsFront[0].texture },
             'uBackTexture': { 'value': renderTargetsBack[0].texture },
@@ -624,16 +635,16 @@ const init = () => {
         fragmentShader: fragMain,
         transparent: true
     })
-    console.log(material.uniforms)
-    const mesh = new THREE.Mesh(geometry, material)
+    console.log(shaderMaterial.uniforms)
+    const mesh = new THREE.Mesh(geometry, shaderMaterial)
     scene.add(mesh)
 
     // Light Object 
     // from https://github.com/mrdoob/three.js/blob/master/examples/webgl_lights_physical.html)
     const bulbGeometry = new THREE.SphereGeometry( 0.1, 16, 8 );
-    const bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 );
+    bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 );
 
-    const bulbMat = new THREE.MeshStandardMaterial( {
+    bulbMat = new THREE.MeshStandardMaterial( {
         emissive: 0xffffff,
         emissiveIntensity: 1,
         color: 0x000000
@@ -649,8 +660,8 @@ const init = () => {
 
     // Controls Change Event Listener
     controls.addEventListener('change', () => {
-        material.uniforms.uCameraPos.value = camera.position
-        material.uniforms.uCameraZoom.value = camera.zoom
+        shaderMaterial.uniforms.uCameraPos.value = camera.position
+        shaderMaterial.uniforms.uCameraZoom.value = camera.zoom
         updateRender()
     })
 
@@ -662,7 +673,7 @@ const init = () => {
             height = window.innerHeight
             camera.aspect = width/height
             camera.updateProjectionMatrix()
-            material.uniforms.uCameraSize.value = new THREE.Vector2(width/dpmm, height/dpmm)
+            shaderMaterial.uniforms.uCameraSize.value = new THREE.Vector2(width/dpmm, height/dpmm)
             groundMirror.getRenderTarget().setSize(
                 window.innerWidth * window.devicePixelRatio,
                 window.innerHeight * window.devicePixelRatio
@@ -688,82 +699,76 @@ const init = () => {
         updateRender()
     })
     sceneFolder.add(meshConfigs, 'lightHue', 0.0, 1.0).onChange( value => {
-        let color = new THREE.Color("hsl("+value*255+", 100%, 50%)")
-        console.log(color)
-        bulbMat.emissive = color
-        let rgb = color.toArray();
-        console.log(rgb)
-        material.uniforms.uLightCol.value = rgb
-        floorMaterial.color = new THREE.Color("hsl("+value*255+", 15%, 20%)")
+        updateLightColor(value)
         updateRender()
     })
     sceneFolder.add(shaderConfigs, 'lightTheta', 0, Math.PI*2).onChange( value => {
-        material.uniforms.uLightTheta.value = value
+        shaderMaterial.uniforms.uLightTheta.value = value
         lightPos = lightPosition(shaderConfigs.lightPhi, value, shaderConfigs.lightRadius),
         bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
         updateRender()
     })
     sceneFolder.add(shaderConfigs, 'lightRadius', 0, 50, 1).onChange( value => {
-        material.uniforms.uLightRadius.value = value
+        shaderMaterial.uniforms.uLightRadius.value = value
         lightPos = lightPosition(shaderConfigs.lightPhi, shaderConfigs.lightTheta, value)
         bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
         updateRender()
     })
     const shaderFolder = gui.addFolder('Shader Configs')
     shaderFolder.add(shaderConfigs, 'stepSize', 0.001, 0.1).onChange( value => { 
-        material.uniforms.uStepSize.value = value 
+        shaderMaterial.uniforms.uStepSize.value = value 
         updateRender()
     })
     shaderFolder.add(shaderConfigs, 'depthPeelSteps', 1, 4, 1).onChange( value => {
-        material.uniforms.uDepthPeelVal.value = value
+        shaderMaterial.uniforms.uDepthPeelVal.value = value
         updateRender()
     })
     
     const geoFolder = gui.addFolder('Geo Configs')
     geoFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
-        material.uniforms.uCellSize.value = value 
+        shaderMaterial.uniforms.uCellSize.value = value 
         updateRender()
     })
     geoFolder.add(shaderConfigs, 'fillFactor', 0.1, 1).onChange( value => { 
-        material.uniforms.uFillFactor.value = value 
+        shaderMaterial.uniforms.uFillFactor.value = value 
         updateRender()
     })
     geoFolder.add(shaderConfigs, 'geoType', {'gyroidBeam': 0, 'gyroidSurface': 1, 'schwarzP': 2, 'octet': 3}).onChange( value => { 
-        material.uniforms.uGeoType.value = value 
+        shaderMaterial.uniforms.uGeoType.value = value 
         updateRender()
     })
     geoFolder.add(shaderConfigs, 'toggleSurfaceNoise').onChange( value => {
-        material.uniforms.uToggleDisplacement.value = value
+        shaderMaterial.uniforms.uToggleDisplacement.value = value
         updateRender()
     })
     geoFolder.add(shaderConfigs, 'surfaceNoiseSize', 0.1, 3.0).onChange( value => {
-        material.uniforms.uAdjustDisp.value = value
+        shaderMaterial.uniforms.uAdjustDisp.value = value
         updateRender()
     })
     
     const matFolder = gui.addFolder('Material Configs')
     matFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
-        material.uniforms.uColor.value = value
+        shaderMaterial.uniforms.uColor.value = value
         updateRender()
     })
     matFolder.add(shaderConfigs, 'ambientStrength', 0.0, 1.0, 0.1).onChange( value => {
-        material.uniforms.uAmbiStrength.value = value
+        shaderMaterial.uniforms.uAmbiStrength.value = value
         updateRender()
     })
     matFolder.add(shaderConfigs, 'diffuseStrength', 0.0, 1.0, 0.1).onChange( value => {
-        material.uniforms.uDiffStrength.value = value
+        shaderMaterial.uniforms.uDiffStrength.value = value
         updateRender()
     })
     matFolder.add(shaderConfigs, 'specularStrength', 0.0, 1.0, 0.1).onChange( value => {
-        material.uniforms.uSpecStrength.value = value
+        shaderMaterial.uniforms.uSpecStrength.value = value
         updateRender()
     })
     matFolder.add(shaderConfigs, 'specularPower', 0.0, 10.0, 0.5).onChange( value => {
-        material.uniforms.uSpecPow.value = value
+        shaderMaterial.uniforms.uSpecPow.value = value
         updateRender()
     })
     matFolder.add(shaderConfigs, 'AOAmplitude', 0, 50, 1).onChange( value => {
-        material.uniforms.uAOAmplitude.value = value
+        shaderMaterial.uniforms.uAOAmplitude.value = value
         updateRender()
     })
 
@@ -825,6 +830,22 @@ function render() {
 // animation
 const animate = () => {
     requestAnimationFrame(animate)
+
+    // controls
+    controls.autoRotate = true
+    controls.autoRotateSpeed = 1
+    controls.update()
+    
+    // animate light
+    shaderConfigs.lightTheta += 0.01
+    if (shaderConfigs.lightTheta > Math.PI*2) { shaderConfigs.lightTheta -= Math.PI*2 }
+    shaderMaterial.uniforms.uLightTheta.value = shaderConfigs.lightTheta
+    let lightPos = lightPosition(shaderConfigs.lightPhi, shaderConfigs.lightTheta, shaderConfigs.lightRadius)
+    bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
+
+    // animate geo color
+    meshConfigs.lightHue += 0.0001 
+    updateLightColor(meshConfigs.lightHue)
     updateRender()
 }
 
