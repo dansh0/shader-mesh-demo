@@ -14,9 +14,6 @@ npm install
 npm start
 ```
 
-### Limitations
-
-The main limitation I am facing is the ability to enter and exit the mesh multiple times. In the geometries torus, torusKnot, and teapot, you can see the shader "give-up" after it exits the first layer of triangles. Any ideas on how to fix this would be appreciated. All it would need is a list of all intersecting triangles with the fragment and their depths, like a raycast would. Even adding a second hardcoded depth checking pass or a third would greatly benefit many geometry cases. 
 
 ### Examples
 ![](https://github.com/dansh0/shader-mesh-demo/blob/main/media/Screenshot%202023-12-19%20094746.png)
