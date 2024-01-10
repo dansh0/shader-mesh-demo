@@ -450,7 +450,7 @@ let depthMeshFront, depthMeshBack
 let depthMatFront, depthMatBack, depthPeelMat
 let renderTargetsBack = [] 
 let renderTargetsFront = []
-let renderer, camera, controls, stats
+let renderer, renderCanvas, camera, controls, stats
 let shaderConfigs, shaderMaterial, meshConfigs
 let bulbLight, bulbMat, floorMaterial
 
@@ -467,13 +467,14 @@ const lightPosition = (phi, theta, radius) => {
 const updateLightColor = (hueVal) => {
     let color = new THREE.Color("hsl("+hueVal*255+", 100%, 50%)")
     bulbMat.emissive = color
-    let rgb = color.toArray();
+    let rgb = color.toArray()
     shaderMaterial.uniforms.uLightCol.value = rgb
     floorMaterial.color = new THREE.Color("hsl("+hueVal*255+", 15%, 20%)")
 }
 
 // Setup
 const init = () => {
+    const canvasParent = document.getElementById('canvasParent')
     
     // Consts
     const dpmm = 25 // dots per mm
@@ -483,17 +484,21 @@ const init = () => {
     // Window Params
     let width = window.innerWidth
     let height = window.innerHeight
-    
+    console.log(width, height)
+
+    renderer = new THREE.WebGLRenderer()
+    renderer.setSize(width, height)
+    renderer.autoClear = false
+    renderCanvas = canvasParent.appendChild(renderer.domElement)
+
+    width = canvasParent.clientWidth
+    height = canvasParent.clientHeight
+
     // Scene, Renderer, Controls
     scene = new THREE.Scene()
     camera = new THREE.OrthographicCamera(-width/(2*dpmm), width/(2*dpmm), height/(2*dpmm), -height/(2*dpmm), cameraNear, cameraFar)
     camera.position.set(25, 15, 20)
     scene.add(camera)
-
-    renderer = new THREE.WebGLRenderer()
-    renderer.setSize(window.innerWidth, window.innerHeight)
-    renderer.autoClear = false;
-    document.body.appendChild(renderer.domElement)
 
     controls = new OrbitControls(camera, renderer.domElement)
     controls.mouseButtons.RIGHT = '' // disable pan
@@ -514,13 +519,13 @@ const init = () => {
     // Render Targets and Secondary Scenes for Depths
     for (let i=0; i<4; i++) {
         renderTargetsFront.push(
-            new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+            new THREE.WebGLRenderTarget(width, height, {
                 minFilter: THREE.LinearFilter,
                 magFilter: THREE.LinearFilter,
             })
         )
         renderTargetsBack.push(
-            new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+            new THREE.WebGLRenderTarget(width, height, {
                 minFilter: THREE.LinearFilter,
                 magFilter: THREE.LinearFilter,
             })
@@ -641,18 +646,18 @@ const init = () => {
 
     // Light Object 
     // from https://github.com/mrdoob/three.js/blob/master/examples/webgl_lights_physical.html)
-    const bulbGeometry = new THREE.SphereGeometry( 0.1, 16, 8 );
-    bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 );
+    const bulbGeometry = new THREE.SphereGeometry( 0.1, 16, 8 )
+    bulbLight = new THREE.PointLight( 0xffee88, 1, 100, 2 )
 
     bulbMat = new THREE.MeshStandardMaterial( {
         emissive: 0xffffff,
         emissiveIntensity: 1,
         color: 0x000000
-    } );
+    } )
     console.log(bulbMat)
-    bulbLight.add( new THREE.Mesh( bulbGeometry, bulbMat ) );
-    bulbLight.castShadow = true;
-    scene.add( bulbLight );
+    bulbLight.add( new THREE.Mesh( bulbGeometry, bulbMat ) )
+    bulbLight.castShadow = true
+    scene.add( bulbLight )
 
     // Adjust Light Position
     let lightPos = lightPosition(shaderConfigs.lightPhi, shaderConfigs.lightTheta, shaderConfigs.lightRadius)
@@ -669,16 +674,28 @@ const init = () => {
     window.addEventListener(
         'resize',
         () => {
-            width = window.innerWidth
-            height = window.innerHeight
-            camera.aspect = width/height
+            console.log('resize')
+
+            // Get new width & height
+            width = canvasParent.clientWidth
+            height = canvasParent.clientHeight
+            
+            // Update Camera
+            camera.left = -width/(2*dpmm)
+            camera.right = width/(2*dpmm)
+            camera.top = height/(2*dpmm)
+            camera.bottom = -height/(2*dpmm)
             camera.updateProjectionMatrix()
+
+            // Update Shader
             shaderMaterial.uniforms.uCameraSize.value = new THREE.Vector2(width/dpmm, height/dpmm)
-            groundMirror.getRenderTarget().setSize(
-                window.innerWidth * window.devicePixelRatio,
-                window.innerHeight * window.devicePixelRatio
-            );
+
+            // Update Renderer and RenderTargets
             renderer.setSize(width, height)
+            for (let i=0; i<4; i++) {
+                renderTargetsFront[i].setSize(width, height)
+                renderTargetsBack[i].setSize(width, height)
+            }
             updateRender()
         },
         false
@@ -686,11 +703,16 @@ const init = () => {
 
     // FPS Stats
     stats = Stats()
-    document.body.appendChild(stats.dom)
+    stats.dom.style.top = canvasParent.getBoundingClientRect().top+5 + 'px' // hacky way to get it to follow the div
+    canvasParent.appendChild(stats.dom)
 
     // UI and Handlers
-    const gui = new GUI()
-    const sceneFolder = gui.addFolder('Scene Configs')
+    const gui = new GUI({container: canvasParent})
+    const guiElem = gui.domElement
+    guiElem.style.position = "absolute"
+    guiElem.style.top = '10px'
+    guiElem.style.right = "10px"
+    const sceneFolder = gui.addFolder('__Scene Configs')
     sceneFolder.add(meshConfigs, 'Animate!')
     sceneFolder.add(meshConfigs, 'geometry', Object.keys(geometries)).onChange( value => {
         mesh.geometry = geometries[value]
@@ -714,7 +736,7 @@ const init = () => {
         bulbLight.position.set(lightPos[0], lightPos[1], lightPos[2])
         updateRender()
     })
-    const shaderFolder = gui.addFolder('Shader Configs')
+    const shaderFolder = gui.addFolder('__Shader Configs')
     shaderFolder.add(shaderConfigs, 'stepSize', 0.001, 0.1).onChange( value => { 
         shaderMaterial.uniforms.uStepSize.value = value 
         updateRender()
@@ -724,7 +746,7 @@ const init = () => {
         updateRender()
     })
     
-    const geoFolder = gui.addFolder('Geo Configs')
+    const geoFolder = gui.addFolder('__Geo Configs')
     geoFolder.add(shaderConfigs, 'cellSize', 0.5, 10).onChange( value => { 
         shaderMaterial.uniforms.uCellSize.value = value 
         updateRender()
@@ -746,7 +768,7 @@ const init = () => {
         updateRender()
     })
     
-    const matFolder = gui.addFolder('Material Configs')
+    const matFolder = gui.addFolder('__Material Configs')
     matFolder.addColor({color:shaderConfigs.color}, 'color').onChange( value => {
         shaderMaterial.uniforms.uColor.value = value
         updateRender()
@@ -801,27 +823,27 @@ function render() {
     depthMeshFront.material = depthPeelMat
     depthMeshBack.material = depthPeelMat
     let gl = renderer.getContext() // get webGL context
-    gl.enable(gl.CULL_FACE);
+    gl.enable(gl.CULL_FACE)
 
     for (let iPass=1; iPass<4; iPass++) {
         
         // Front pass
         depthPeelMat.uniforms.uOutputRef.value = renderTargetsBack[iPass-1].texture
-        gl.cullFace(gl.BACK);
+        gl.cullFace(gl.BACK)
         renderer.setRenderTarget(renderTargetsFront[iPass])
         renderer.clear()
         renderer.render(frontScene, camera)
         
         // Back pass
         depthPeelMat.uniforms.uOutputRef.value = renderTargetsFront[iPass].texture
-        gl.cullFace(gl.FRONT);
+        gl.cullFace(gl.FRONT)
         renderer.setRenderTarget(renderTargetsBack[iPass])
         renderer.clear()
         renderer.render(backScene, camera)
     }
 
     // render scene
-    gl.cullFace(gl.BACK);
+    gl.cullFace(gl.BACK)
     renderer.setRenderTarget(null)
     renderer.clear()
     renderer.render(scene, camera)

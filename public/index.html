@@ -5,8 +5,19 @@
         <title>Mesh Shader Demo</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
+            html {
+                height: 100%;
+                width: 100%;
+            }
             body {
                 overflow: hidden;
+                height: 100%;
+                width: 100%;
+                margin: 0px;
+            }
+            #canvasParent {
+                height: 100%;
+                width: 100%;
                 margin: 0px;
             }
         </style>
@@ -28,6 +39,7 @@
     </head>
 
     <body>
+        <div id="canvasParent"></div>
         <script type="module" src="client.js"></script>
     </body>
 </html>
